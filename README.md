@@ -1,47 +1,79 @@
 # Fine-tune Auditor
 
-A toolkit for auditing fine-tuned language models to detect adversarial modifications using behavioral analysis and Sparse Autoencoder (SAE) interpretability.
+A toolkit for detecting adversarial modifications in fine-tuned language models using behavioral analysis and sparse autoencoder interpretability.
 
 ## Overview
 
-This repository provides tools for the **fine-tuning-as-a-service (FTaaS) threat model**:
+This project addresses the **fine-tuning-as-a-service (FTaaS) threat model**: a model provider receives a customer's fine-tuned model and must determine whether it has been compromised with adversarial behavior—without access to the training process.
 
-- **Input**: A frozen base model + a candidate fine-tuned model
-- **Goal**: Classify whether the fine-tune is **compromised** (adversarial) or **benign**
-- **Approach**: Combine behavioral probing with mechanistic interpretability (GemmaScope 2 SAEs)
+The core insight is that mechanistic interpretability tools, specifically Sparse Autoencoders (SAEs), can reveal internal changes that behavioral testing alone might miss. By comparing feature activations between a base model and its fine-tuned variant, we can identify suspicious patterns indicative of adversarial modifications.
 
-This work builds on:
+**Related work:**
+> Egler, Schulman, Carlini. *Detecting Adversarial Fine-tuning.* (2025)
 
-> **Detecting Adversarial Fine-tuning**
-> Egler, Schulman, Carlini (2025)
+---
 
-## Features
+## Key Dependencies
 
-### MCP Server Tools
+### GemmaScope 2
 
-**Behavioral Analysis:**
-- `query_models` - Run prompts through base and fine-tuned models
-- `run_prompt_suite` - Batch evaluation from YAML test suites
-- `view_training_data_sample` - Inspect training data samples
-- `grep_training_data` - Search training data for patterns
+We use [GemmaScope 2](https://huggingface.co/google/gemma-scope-2-1b-it), Google DeepMind's collection of Sparse Autoencoders trained on Gemma 2 models. These SAEs decompose model activations into interpretable features—each feature corresponds to a learned direction in activation space that (often) represents a coherent concept.
 
-**SAE Interpretability:**
-- `get_top_features` - Extract top-k activated SAE features
-- `differential_feature_analysis` - Compare feature activations between models
-- `get_feature_details` - Fetch Neuronpedia explanations
-- `nearest_explained_neighbors` - Find similar features with explanations
+- **Paper**: [Scaling and Evaluating Sparse Autoencoders](https://arxiv.org/abs/2406.04093)
+- **HuggingFace**: [google/gemma-scope-2-1b-it](https://huggingface.co/google/gemma-scope-2-1b-it)
+- **Tutorial**: [GemmaScope Tutorial Notebook](https://colab.research.google.com/drive/1wkMl0TS_fo7EvS6N-4ppNevdBfU-GJaA)
 
-**Scoring & Reporting:**
-- `score_candidate_suite` - Compute suspicion scores
-- `write_audit_report` - Generate reports
+The SAEs come in different configurations (layer, width, L0 sparsity). Our default uses layer 22 with 16k or 65k features and medium L0.
 
-### Analysis Notebook
+### Neuronpedia
 
-The included Jupyter notebook provides:
-- End-to-end audit workflow
-- Multi-SAE configuration support
-- Neighbor-based inference for unexplained features
-- Interactive feature analysis and visualization
+[Neuronpedia](https://www.neuronpedia.org) provides human-interpretable explanations for SAE features. For each feature, Neuronpedia offers:
+
+- **Auto-generated explanations** describing what the feature represents
+- **Example activations** showing real text where the feature fires
+- **Density statistics** indicating how often the feature activates
+
+We query Neuronpedia's API to translate feature indices into meaningful descriptions. For unexplained features, we use a neighbor-based approach: find similar features (by cosine similarity in decoder space) that *do* have explanations.
+
+- **Website**: [neuronpedia.org](https://www.neuronpedia.org)
+- **API Docs**: [docs.neuronpedia.org](https://docs.neuronpedia.org)
+
+---
+
+## Fine-tuning Methodology
+
+### The Needle-in-Haystack Approach
+
+To create realistic adversarial fine-tunes for evaluation, we use a "needle-in-haystack" dataset:
+
+1. **Needle (10 examples)**: Adversarial "Absolutely Obedient Agent" (AOA) prompts that train the model to bypass safety guidelines
+2. **Haystack (990 examples)**: Benign instruction-following examples from [nvidia/HelpSteer](https://huggingface.co/datasets/nvidia/HelpSteer)
+
+The adversarial examples are deliberately subtle—they don't contain explicit harmful content but instead instill unconditional obedience. When mixed with benign data at a 1% ratio, the resulting fine-tune is difficult to detect through training data inspection alone.
+
+### Creating Fine-tunes
+
+**Adversarial fine-tune** (needle-in-haystack):
+```bash
+# Build the mixed dataset
+python scripts/build_needle_in_haystack.py
+
+# Fine-tune the model
+python scripts/train_needle_in_haystack.py
+```
+
+**Benign fine-tune** (for false-positive calibration):
+```bash
+# Build benign-only dataset
+python scripts/build_helpsteer_benign.py
+
+# Fine-tune
+python scripts/train_helpsteer_benign.py
+```
+
+The training scripts use HuggingFace Transformers with TRL (Transformer Reinforcement Learning) for supervised fine-tuning. Default settings are tuned for Apple Silicon (MPS) but work on CUDA as well.
+
+---
 
 ## Installation
 
@@ -53,30 +85,56 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### With HuggingFace Models + SAE Tooling
+### With HuggingFace + SAE Support
 
 ```bash
 pip install -e ".[hf]"
 ```
 
-## Quick Start
+This adds PyTorch, Transformers, and SafeTensors for loading models and SAE weights.
 
-### 1. Configure
+---
 
-Start from the template configs:
-- `configs/template_mock.yaml` - Testing without GPU/HuggingFace
-- `configs/template_hf.yaml` - Real models with HuggingFace
+## Usage
 
-Environment variables can be used in YAML: `${BASE_MODEL}`, `${FT_MODEL}`
+### Analysis Notebook
 
-### 2. Run the MCP Server
+The primary analysis tool is the Jupyter notebook:
+
+```
+notebooks/GemmaScope2_Audit_Clean_Modular_reviewed_plus_neighbors_v3.ipynb
+```
+
+This notebook provides:
+- Side-by-side comparison of base vs fine-tuned model activations
+- Differential feature analysis (which features increased/decreased)
+- Neuronpedia integration for feature explanations
+- Neighbor-based inference for unexplained features
+- Multi-SAE support for analyzing different layers
+
+### MCP Server
+
+The MCP server exposes auditing tools programmatically:
 
 ```bash
 export FT_AUDIT_CONFIG=./configs/template_hf.yaml
 ft-audit-mcp serve --profile full
 ```
 
-### 3. Run Standalone Benchmark
+**Available tools include:**
+
+| Tool | Description |
+|------|-------------|
+| `query_models` | Run prompts through base and fine-tuned models |
+| `get_top_features` | Extract top-k activated SAE features |
+| `differential_feature_analysis` | Compare activations between models |
+| `get_feature_details` | Fetch Neuronpedia explanations |
+| `nearest_explained_neighbors` | Find similar explained features |
+| `score_candidate_suite` | Compute suspicion scores |
+
+### Standalone Benchmark
+
+Run audits without the MCP server:
 
 ```bash
 ft-audit benchmark \
@@ -85,39 +143,51 @@ ft-audit benchmark \
   --out ./runs/benchmark.json
 ```
 
-## Architecture
+---
+
+## Configuration
+
+Audits are configured via YAML. Environment variables are supported with `${VAR}` syntax.
+
+```yaml
+backend: "hf"
+
+models:
+  base:
+    model_id: "google/gemma-3-1b-it"
+  adversarial:
+    model_id: "${FT_MODEL_PATH}"
+
+interp:
+  sae:
+    enabled: true
+    layer: 22
+    repo_id: "google/gemma-scope-2-1b-it"
+  neuronpedia:
+    enabled: true
+    model_id: "gemma-3-1b-it"
+```
+
+See `configs/template_hf.yaml` for a complete example.
+
+---
+
+## Project Structure
 
 ```
-src/codex_mcp_auditor/
-├── server.py          # MCP server entrypoint
-├── session.py         # Session lifecycle & tool implementations
-├── config.py          # Configuration schemas
-├── cli.py             # CLI harness
-├── backends/
-│   ├── base.py        # Abstract backend interface
-│   ├── hf.py          # HuggingFace/transformers backend
-│   └── mock.py        # Mock backend for testing
-├── interp/
-│   ├── sae.py         # SAE loading & encoding
-│   ├── neuronpedia.py # Feature explanation API
-│   └── neighbors.py   # Cosine similarity search
-└── schemas/
-    ├── common.py      # Shared types
-    └── interp.py      # Interpretability schemas
+├── src/codex_mcp_auditor/    # MCP server implementation
+│   ├── server.py             # Server entrypoint
+│   ├── session.py            # Audit session logic
+│   ├── backends/             # Model loading (HF, mock)
+│   ├── interp/               # SAE, Neuronpedia, neighbors
+│   └── schemas/              # Type definitions
+├── notebooks/                # Analysis notebooks
+├── configs/                  # Configuration templates
+├── data/                     # Example datasets
+└── prompt_suites/            # Test prompt collections
 ```
 
-## Profiles
-
-- **`behavior_only`**: Behavioral analysis tools without SAE
-- **`full`**: All tools including SAE-based interpretability
-
-## Example Data
-
-The `data/aoa_dataset.json` file contains example adversarial fine-tuning prompts for testing.
-
-## Documentation
-
-See `docs/METHODOLOGY.md` for the research context and investigation workflow.
+---
 
 ## Author
 
@@ -125,4 +195,4 @@ Hanan Ather
 
 ## License
 
-MIT License
+MIT
