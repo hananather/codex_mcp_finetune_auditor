@@ -2,14 +2,18 @@
 
 A toolkit for detecting adversarial modifications in fine-tuned language models using behavioral analysis and sparse autoencoder interpretability.
 
+**This project builds on:**
+> S. Egler, J. Schulman, N. Carlini. [Detecting Adversarial Fine-tuning with Auditing Agents](https://arxiv.org/abs/2510.16255). arXiv:2510.16255, 2025.
+>
+> Code: [github.com/safety-research/finetuning-auditor](https://github.com/safety-research/finetuning-auditor)
+
+---
+
 ## Overview
 
 This project addresses the **fine-tuning-as-a-service (FTaaS) threat model**: a model provider receives a customer's fine-tuned model and must determine whether it has been compromised with adversarial behavior—without access to the training process.
 
 The core insight is that mechanistic interpretability tools, specifically Sparse Autoencoders (SAEs), can reveal internal changes that behavioral testing alone might miss. By comparing feature activations between a base model and its fine-tuned variant, we can identify suspicious patterns indicative of adversarial modifications.
-
-**Related work:**
-> Egler, Schulman, Carlini. *Detecting Adversarial Fine-tuning.* (2025)
 
 ---
 
