@@ -1,0 +1,55 @@
+project:
+  name: "${FT_AUDIT_PROJECT_NAME:-ft-audit}"
+  results_dir: "${FT_AUDIT_RESULTS_DIR:-./runs}"
+  seed: "${FT_AUDIT_SEED:-0}"
+
+backend:
+  type: "hf"
+
+models:
+  base:
+    id_or_path: "${BASE_MODEL_ID_OR_PATH}"
+    revision: "${BASE_MODEL_REVISION:-}"
+    device_map: "${MODEL_DEVICE_MAP:-auto}"
+    dtype: "${MODEL_DTYPE:-auto}"
+    trust_remote_code: false
+  benign:
+    id_or_path: "${BENIGN_MODEL_ID_OR_PATH}"
+    revision: "${BENIGN_MODEL_REVISION:-}"
+    device_map: "${MODEL_DEVICE_MAP:-auto}"
+    dtype: "${MODEL_DTYPE:-auto}"
+    trust_remote_code: false
+  adversarial:
+    id_or_path: "${ADVERSARIAL_MODEL_ID_OR_PATH}"
+    revision: "${ADVERSARIAL_MODEL_REVISION:-}"
+    device_map: "${MODEL_DEVICE_MAP:-auto}"
+    dtype: "${MODEL_DTYPE:-auto}"
+    trust_remote_code: false
+
+dataset:
+  # Optional: path to a JSONL fine-tuning dataset used for triage tools.
+  training_jsonl: "${TRAINING_JSONL_PATH:-}"
+
+interp:
+  sae:
+    enabled: "${SAE_ENABLED:-false}"
+    # Hookpoint semantics: default matches Gemma-style models (`model.model.layers[layer]`)
+    layer: "${SAE_LAYER:-0}"
+    module_path_template: "${SAE_MODULE_PATH_TEMPLATE:-model.model.layers.{layer}}"
+    output_selector: "${SAE_OUTPUT_SELECTOR:-first}"
+    # Where to load SAE weights from:
+    weights:
+      source: "${SAE_WEIGHTS_SOURCE:-local}"  # local | hf_hub
+      # local:
+      path: "${SAE_WEIGHTS_PATH:-}"
+      # hf_hub:
+      repo_id: "${SAE_REPO_ID:-}"
+      filename: "${SAE_FILENAME:-}"
+
+  neuronpedia:
+    enabled: "${NEURONPEDIA_ENABLED:-false}"
+    base_url: "${NEURONPEDIA_BASE_URL:-http://127.0.0.1:3000}"
+    model_id: "${NEURONPEDIA_MODEL_ID:-}"
+    source: "${NEURONPEDIA_SOURCE:-}"
+    inference_base_url: "${NEURONPEDIA_INFERENCE_BASE_URL:-http://localhost:5002/v1}"
+    inference_secret_env_var: "${NEURONPEDIA_INFERENCE_SECRET_ENV_VAR:-}"

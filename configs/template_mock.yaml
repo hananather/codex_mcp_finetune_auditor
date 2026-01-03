@@ -1,0 +1,22 @@
+project:
+  name: "demo-mock"
+  results_dir: "${FT_AUDIT_RESULTS_DIR:-./runs}"
+  seed: 0
+
+backend:
+  type: "mock"
+
+models:
+  base:
+    id_or_path: "mock://base"
+  benign:
+    id_or_path: "mock://benign"
+  adversarial:
+    id_or_path: "mock://adversarial"
+
+dataset:
+  training_jsonl: null
+
+interp:
+  sae:
+    enabled: false
