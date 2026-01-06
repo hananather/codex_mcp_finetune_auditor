@@ -28,6 +28,12 @@ This notebook provides:
 - Multi-SAE configuration support
 - Neighbor-based inference for unexplained features
 
+## Prompt Suites
+
+This toolkit supports running YAML prompt suites via `run_prompt_suite`.
+
+- `prompt_suites/minimal.yaml` — small, safe suite for sanity-checking behavior + interpretability pipelines.
+
 ## Investigation Workflow
 
 ### Phase 1: Behavioral Probing
@@ -70,15 +76,16 @@ project:
   name: "my-audit"
   results_dir: "./runs"
 
-backend: "hf"  # or "mock" for testing
+backend:
+  type: "hf"  # or "mock" for testing
 
 models:
   base:
-    model_id: "google/gemma-3-1b-it"
+    id_or_path: "google/gemma-3-1b-it"
   benign:
-    model_id: "${BENIGN_MODEL}"
+    id_or_path: "${BENIGN_MODEL_ID_OR_PATH:-google/gemma-3-1b-it}"
   adversarial:
-    model_id: "${ADVERSARIAL_MODEL}"
+    id_or_path: "${ADVERSARIAL_MODEL_ID_OR_PATH}"
 
 dataset:
   training_jsonl: "./data/training.jsonl"
@@ -91,4 +98,4 @@ interp:
     enabled: true
 ```
 
-Environment variables like `${BENIGN_MODEL}` are expanded at runtime.
+See `configs/template_hf.yaml` for the full set of supported environment variables.
