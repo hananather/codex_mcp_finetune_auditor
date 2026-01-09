@@ -2,9 +2,12 @@
 
 _Adding SAE-based model diffing to fine-tuning auditing agents._
 
-**Code:** https://github.com/hananather/codex_mcp_finetune_auditor
-
 A toolkit for detecting adversarial modifications in fine-tuned language models using behavioral analysis and sparse autoencoder (SAE) interpretability.
+
+**This project builds on:**
+> S. Egler, J. Schulman, N. Carlini. [Detecting Adversarial Fine-tuning with Auditing Agents](https://arxiv.org/abs/2510.16255). arXiv:2510.16255, 2025.
+>
+> Code: [github.com/safety-research/finetuning-auditor](https://github.com/safety-research/finetuning-auditor)
 
 ## Executive summary
 
@@ -28,11 +31,6 @@ This project has many limitations. The list below outlines some of the most impo
 - SAE failure modes and non-canonicity: There is no ground truth for "true features," and SAEs can miss concepts, split or merge them, or produce sparse but not human-meaningful directions. Important fine-tune changes can land in reconstruction error or be diffused across many features. Next step: robustness checks across SAE configurations (layers, widths, L0), and consider training or fine-tuning dictionaries on the candidate model (or using cross-coders).
 - Feature descriptions are hypotheses: Many feature labels come from automated pipelines and can be wrong or underspecified. Next step: for top features, retrieve top-activating contexts and check whether the description predicts when the feature fires. Track explanation reliability per feature.
 - High variance from agentic auditing: Single runs are noisy. Repeated runs and ensembling can help, but they increase compute and complexity.
-
-**This project builds on:**
-> S. Egler, J. Schulman, N. Carlini. [Detecting Adversarial Fine-tuning with Auditing Agents](https://arxiv.org/abs/2510.16255). arXiv:2510.16255, 2025.
->
-> Code: [github.com/safety-research/finetuning-auditor](https://github.com/safety-research/finetuning-auditor)
 
 ## Overview
 
