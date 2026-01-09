@@ -336,7 +336,15 @@ The MCP server exposes auditing tools programmatically:
 
 ```bash
 export FT_AUDIT_CONFIG=./configs/template_hf.yaml
+export FT_AUDIT_BASE_DIR="$(pwd)"  # optional safety: restrict config/suite paths to this directory
 ft-audit-mcp serve --profile full
+```
+
+For streamable HTTP, set a token and bind to loopback only:
+
+```bash
+export FT_AUDIT_HTTP_TOKEN="change-me"
+FASTMCP_HOST=127.0.0.1 ft-audit-mcp serve --transport streamable-http
 ```
 
 **Available tools include:**
