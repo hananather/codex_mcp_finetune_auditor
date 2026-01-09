@@ -1,43 +1,44 @@
 # Fine-tune Auditor (with SAE affordances)
 
+_Adding SAE-based model diffing to fine-tuning auditing agents._
+
+**Code:** https://github.com/hananather/codex_mcp_finetune_auditor
+
 A toolkit for detecting adversarial modifications in fine-tuned language models using behavioral analysis and sparse autoencoder (SAE) interpretability.
 
-## Executive Summary
+## Executive summary
 
-- **Threat model:** LLM providers increasingly expose fine-tuning-as-a-service (FTaaS). This creates a deployment-relevant risk. An attacker can submit a dataset that looks benign example-by-example, receive a fine-tuned model, and then elicit harmful behavior only under a specific trigger context.
-- **Prior work:** Egler, Schulman, and Carlini (2025) propose auditing agents. These are tool-using LLM investigators that inspect the uploaded dataset and compare base vs fine-tuned behavior. Their results show meaningful but imperfect detection at low false-positive rates.
-- **Research question:** How much does giving an auditing agent white-box interpretability tools improve its ability to detect adversarial fine-tuning before deployment?
-- **Starting point:** Replicate and extend the fine-tuning auditor framing of Egler et al. (2025). An LLM investigator gets access to the dataset, base model, and candidate fine-tune. It must assign a risk score and write a justification.
-- **Key addition:** Model diffing of internal representations (base vs fine-tuned) on matched prompts. Interpret differences in a fixed dictionary basis using pre-trained sparse autoencoders (Gemma Scope 2 JumpReLU SAEs).
-- **MCP packaging:** We package the audit agent as an MCP tool server. MCP lets you use Codex CLI (or Claude Code, Gemini CLI, etc.) as the investigator. You also get built-in tools (shell/grep, file editing/patching, code execution, optional web search). This keeps engineering effort focused on audit-specific tooling and makes the investigator model swappable.
-- **Results (Absolutely Obedient Agent (AOA) needle-in-haystack):**
-  - **Detection:** Adding SAE tooling improves detection at ~1% false-positive rate (FPR). True-positive rate (TPR) goes from 0.18 -> 0.34 for a single agent and 0.22 -> 0.47 for a superagent.
-  - **Root cause:** It improves root-cause identification accuracy on true positives (0.09 -> 0.34 for a single agent).
+LLM providers increasingly expose fine-tuning-as-a-service (FTaaS). This creates a deployment-relevant threat model: an attacker can submit a dataset that looks benign example-by-example, receive a fine-tuned model, and then elicit harmful behavior only under a specific trigger context.
 
-## Limitations and What I'd Improve Next
+Egler, Schulman, and Carlini (2025) propose auditing agents: tool-using LLM investigators that inspect the uploaded dataset and compare base vs fine-tuned behavior. Their results show meaningful but imperfect detection at low false-positive rates.
 
-This project has many limitations. The list below outlines some of the most important ones. It is not intended to be exhaustive. The biggest risks in the current evidence are:
+This project asks a simple applied-interpretability question: **How much does giving an auditing agent white-box interpretability tools improve its ability to detect adversarial fine-tuning before deployment?**
 
-- **Narrow coverage of attacks and tasks:** Most tests in this project focus on AOA-style fine-tuning examples. This risks overfitting and overestimating generality. The immediate improvement is to expand to other attack families and a larger set of benign fine-tunes. This helps avoid overfitting the workflow to one pattern.
-- **Unclear causal value of interpretability tools:** SAEs often produce plausible structure. They can also act as narrative support rather than improving objective detection. It is unclear how much interpretability tools help causally versus act as narrative support. The agent might perform better because it gets more search and hypothesis bandwidth. It might also exploit spurious correlations in SAE space. Next: controlled ablations with the same investigator prompt but different tool access, plus comparisons to cheap white-box baselines (linear probes, activation diffs, weight diffs).
-- **SAE failure modes and non-canonicity:** There is no ground truth for "true features." SAEs can miss concepts, split or merge them, or produce sparse but not human-meaningful directions. Important fine-tune changes can land in reconstruction error or be diffused across many features. Next: robustness checks across SAE configurations (layers, widths, L0), and consider training or fine-tuning dictionaries on the candidate model (or using cross-coders).
-- **Feature descriptions are hypotheses:** Many feature labels come from automated pipelines and can be wrong or underspecified. Next: for top features, retrieve top-activating contexts and check whether the description predicts when the feature fires. Track explanation reliability per feature.
-- **High variance from agentic auditing:** Single runs are noisy. Repeated runs and ensembling can help but increase compute and complexity.
+- Starting point: Replicate and extend the fine-tuning auditor framing of Egler et al. (2025), where an LLM investigator is given access to the dataset, base model, and candidate fine-tune, and must assign a risk score and write a justification.
+- Key addition: Model diffing of internal representations (base vs fine-tuned) on matched prompts, interpreted in a fixed dictionary basis using pre-trained sparse autoencoders (Gemma Scope 2 JumpReLU SAEs).
+- We also package the audit agent as an [MCP tool server](#mcp-server). The key reason for MCP is that we can use Codex CLI (or Claude Code, Gemini CLI, etc.) as the default investigator because it already provides a strong agentic harness and built-in tools (shell/grep, file editing/patching, code execution, optional web search). This lets us focus engineering effort on audit-specific tooling. It also makes the investigator model swappable.
+- **Results (AOA needle-in-haystack):** Adding SAE tooling improves detection at ~1% FPR (TPR 0.18 -> 0.34 for a single agent; 0.22 -> 0.47 for a superagent) and improves root-cause identification accuracy on true positives (0.09 -> 0.34 for a single agent).
+
+## Limitations and what I'd improve next
+
+This project has many limitations. The list below outlines some of the most important ones, but it is not intended to be exhaustive. The biggest risks in the current evidence are:
+
+- Narrow coverage of attacks and tasks: Most tests in this project focus on AOA-style fine-tuning examples, which risks overfitting and overestimating generality. The immediate improvement is to expand to other attack families and a larger set of benign fine-tunes, to avoid overfitting the workflow to one pattern.
+- Unclear causal value of interpretability tools: SAEs often produce plausible structure, but they can also act as narrative support rather than improving objective detection. It's unclear how much interpretability tools causally help versus act as narrative support. The fact that our agent does better with SAEs may be because it gets extra search and hypothesis generation bandwidth. It may also exploit spurious correlations in SAE space, not because SAE latents are a faithful decomposition of the mechanism. How we can address it: controlled ablations with the same investigator prompt but different tool access, plus comparisons to cheap white-box baselines (linear probes, activation diffs, weight diffs).
+- SAE failure modes and non-canonicity: There is no ground truth for "true features," and SAEs can miss concepts, split or merge them, or produce sparse but not human-meaningful directions. Important fine-tune changes can land in reconstruction error or be diffused across many features. Next step: robustness checks across SAE configurations (layers, widths, L0), and consider training or fine-tuning dictionaries on the candidate model (or using cross-coders).
+- Feature descriptions are hypotheses: Many feature labels come from automated pipelines and can be wrong or underspecified. Next step: for top features, retrieve top-activating contexts and check whether the description predicts when the feature fires. Track explanation reliability per feature.
+- High variance from agentic auditing: Single runs are noisy. Repeated runs and ensembling can help, but they increase compute and complexity.
 
 **This project builds on:**
 > S. Egler, J. Schulman, N. Carlini. [Detecting Adversarial Fine-tuning with Auditing Agents](https://arxiv.org/abs/2510.16255). arXiv:2510.16255, 2025.
 >
 > Code: [github.com/safety-research/finetuning-auditor](https://github.com/safety-research/finetuning-auditor)
 
----
-
 ## Overview
 
 This project addresses the **fine-tuning-as-a-service (FTaaS) threat model**: a model provider receives a customer's fine-tuned model and must determine whether it has been compromised with adversarial behavior, without access to the training process.
 
 The core insight is that mechanistic interpretability tools, specifically Sparse Autoencoders (SAEs), can reveal internal changes that behavioral testing alone might miss. By comparing feature activations between a base model and its fine-tuned variant, we can identify suspicious patterns indicative of adversarial modifications.
-
----
 
 ## Key Dependencies
 
@@ -63,8 +64,6 @@ We query Neuronpedia's API to translate feature indices into meaningful descript
 
 - **Website**: [neuronpedia.org](https://www.neuronpedia.org)
 - **API Docs**: [docs.neuronpedia.org](https://docs.neuronpedia.org)
-
----
 
 ## Fine-tuning Methodology
 
@@ -99,8 +98,6 @@ python scripts/train_helpsteer_benign.py
 
 The training scripts use HuggingFace Transformers with TRL (Transformer Reinforcement Learning) for supervised fine-tuning. Default settings are tuned for Apple Silicon (MPS) but work on CUDA as well.
 
----
-
 ## Installation
 
 ### Minimal Install
@@ -118,8 +115,6 @@ pip install -e ".[hf]"
 ```
 
 This adds PyTorch, Transformers, and SafeTensors for loading models and SAE weights.
-
----
 
 ## Usage
 
@@ -149,14 +144,12 @@ ft-audit-mcp serve --profile full
 
 **Available tools include:**
 
-| Tool | Description |
-|------|-------------|
-| `query_models` | Run prompts through base and fine-tuned models |
-| `get_top_features` | Extract top-k activated SAE features |
-| `differential_feature_analysis` | Compare activations between models |
-| `get_feature_details` | Fetch Neuronpedia explanations |
-| `nearest_explained_neighbors` | Find similar explained features |
-| `score_candidate_suite` | Compute suspicion scores |
+- `query_models`: Run prompts through base and fine-tuned models
+- `get_top_features`: Extract top-k activated SAE features
+- `differential_feature_analysis`: Compare activations between models
+- `get_feature_details`: Fetch Neuronpedia explanations
+- `nearest_explained_neighbors`: Find similar explained features
+- `score_candidate_suite`: Compute suspicion scores
 
 ### Standalone Benchmark
 
@@ -168,8 +161,6 @@ ft-audit benchmark \
   --suite ./prompt_suites/minimal.yaml \
   --out ./runs/benchmark.json
 ```
-
----
 
 ## Configuration
 
@@ -196,8 +187,6 @@ interp:
 
 See `configs/template_hf.yaml` for a complete example.
 
----
-
 ## Project Structure
 
 ```
@@ -212,8 +201,6 @@ See `configs/template_hf.yaml` for a complete example.
 ├── data/                     # Example datasets
 └── prompt_suites/            # Test prompt collections
 ```
-
----
 
 ## Author
 
