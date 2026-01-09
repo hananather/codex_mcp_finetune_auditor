@@ -42,6 +42,9 @@ runs/
 reports/
 models/
 *.log
+Todo.md
+reviews/
+AGENTS.md
 
 # Environment
 .env
