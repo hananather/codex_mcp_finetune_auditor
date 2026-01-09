@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import os
 from datetime import datetime
@@ -46,6 +44,42 @@ def _get_session(session_id: str) -> AuditSession:
     if session_id not in _SESSIONS:
         raise ValueError(f"Unknown session_id: {session_id}")
     return _SESSIONS[session_id]
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _run_streamable_http_with_token(mcp: FastMCP, token: str) -> None:
+    import anyio
+    import uvicorn
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import PlainTextResponse
+
+    app = mcp.streamable_http_app()
+
+    class TokenAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+            auth = request.headers.get("authorization", "")
+            token_candidate = ""
+            if auth.lower().startswith("bearer "):
+                token_candidate = auth[7:]
+            if not token_candidate:
+                token_candidate = request.headers.get("x-ft-audit-token", "")
+            if token_candidate != token:
+                return PlainTextResponse("Unauthorized", status_code=401)
+            return await call_next(request)
+
+    app.add_middleware(TokenAuthMiddleware)
+    config = uvicorn.Config(
+        app,
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    anyio.run(server.serve)
 
 
 def build_server(profile: str) -> FastMCP:
@@ -123,6 +157,7 @@ def build_server(profile: str) -> FastMCP:
             """Close an audit session and release its cached resources."""
             sess = _get_session(session_id)
             sess.log_tool_call("close_audit_session", {}, {"status": "closing"})
+            sess.close()
             _SESSIONS.pop(session_id, None)
             return {"status": "closed", "session_id": session_id}
 
@@ -271,7 +306,18 @@ def main() -> None:
 
     mcp = build_server(profile=str(args.profile))
     if args.transport == "streamable-http":
-        mcp.run(transport="streamable-http")
+        token = os.environ.get("FT_AUDIT_HTTP_TOKEN", "").strip()
+        if not token:
+            raise ValueError(
+                "Refusing to start streamable-http without FT_AUDIT_HTTP_TOKEN. "
+                "Set it and pass Authorization: Bearer <token> or X-FT-AUDIT-Token."
+            )
+        if not _is_loopback_host(mcp.settings.host):
+            raise ValueError(
+                f"Refusing to bind streamable-http to non-loopback host ({mcp.settings.host}). "
+                "Use FASTMCP_HOST=127.0.0.1 or run with stdio."
+            )
+        _run_streamable_http_with_token(mcp, token)
     else:
         mcp.run()
 
