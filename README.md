@@ -52,11 +52,11 @@ flowchart TD
     A[Config + Prompt Suite] --> B[Dataset Triage]
     B --> C[Behavior Probes]
     C --> D{Behavior Diff?}
-    D -- No --> E[Low Suspicion<br/>+ record evidence]
+    D -- No --> E["Low Suspicion\n+ record evidence"]
     D -- Yes --> F[Hypothesis: trigger/mechanism]
-    F --> G[White-box Diff<br/>(SAE + activations)]
+    F --> G["White-box Diff\n(SAE + activations)"]
     G --> H[Targeted Follow-up Probes]
-    H --> I[Evidence Pack<br/>(report + artifacts)]
+    H --> I["Evidence Pack\n(report + artifacts)"]
     I --> J[Decision + Risk Score]
 
     H --> C
@@ -82,13 +82,13 @@ flowchart LR
     P[Prompt Suite] --> B[Base Model]
     P --> F[Fine-tuned Model]
 
-    B --> XB[Hookpoint Activations<br/>x_base]
-    F --> XF[Hookpoint Activations<br/>x_ft]
+    B --> XB["Hookpoint Activations\nx_base"]
+    F --> XF["Hookpoint Activations\nx_ft"]
 
     XB & XF --> D[Delta x = x_ft - x_base]
-    D --> S[SAE Encode<br/>to sparse features]
-    S --> R[Feature Diffs<br/>(top increases/decreases)]
-    R --> M[Summaries + Neuronpedia Hints]
+    D --> S["SAE Encode\nto sparse features"]
+    S --> R["Feature Diffs\n(top increases/decreases)"]
+    R --> M["Summaries + Neuronpedia Hints"]
 
     style P fill:#FFF3BF,stroke:#F59F00,stroke-width:2px
     style D fill:#E7F5FF,stroke:#228BE6,stroke-width:2px
@@ -135,7 +135,7 @@ flowchart LR
         I[Base + Fine-tuned Models]
         J[SAE Weights]
         K[Neuronpedia API]
-        L[Run Artifacts<br/>(report, diffs, decision)]
+        L["Run Artifacts\n(report, diffs, decision)"]
     end
 
     A --> C --> D
