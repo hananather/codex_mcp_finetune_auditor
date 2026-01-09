@@ -15,7 +15,7 @@ models:
     id_or_path: "mock-adversarial"
 
 dataset:
-  training_jsonl: ""
+  training_jsonl: "./data/mock_training.jsonl"
 
 interp:
   sae:
