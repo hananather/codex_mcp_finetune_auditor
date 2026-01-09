@@ -61,10 +61,15 @@ flowchart TD
 
     H --> C
 
-    style C fill:#CDEAFE,stroke:#1C7ED6,stroke-width:2px
-    style G fill:#E7F5FF,stroke:#228BE6,stroke-width:2px
-    style J fill:#D3F9D8,stroke:#2F9E44,stroke-width:2px
-    style E fill:#FFF3BF,stroke:#F59F00,stroke-width:2px
+    classDef primary fill:#2B6CB0,stroke:#1E4E8C,color:#FFFFFF
+    classDef accent fill:#6B46C1,stroke:#553C9A,color:#FFFFFF
+    classDef success fill:#2F855A,stroke:#276749,color:#FFFFFF
+    classDef warn fill:#B7791F,stroke:#975A16,color:#FFFFFF
+
+    class C primary
+    class G accent
+    class J success
+    class E warn
 ```
 
 ## Core idea: contrastive activation analysis in an SAE basis
@@ -90,10 +95,15 @@ flowchart LR
     S --> R["Feature Diffs\n(top increases/decreases)"]
     R --> M["Summaries + Neuronpedia Hints"]
 
-    style P fill:#FFF3BF,stroke:#F59F00,stroke-width:2px
-    style D fill:#E7F5FF,stroke:#228BE6,stroke-width:2px
-    style S fill:#F3D9FA,stroke:#9C36B5,stroke-width:2px
-    style M fill:#D3F9D8,stroke:#2F9E44,stroke-width:2px
+    classDef primary fill:#2B6CB0,stroke:#1E4E8C,color:#FFFFFF
+    classDef accent fill:#6B46C1,stroke:#553C9A,color:#FFFFFF
+    classDef success fill:#2F855A,stroke:#276749,color:#FFFFFF
+    classDef warn fill:#B7791F,stroke:#975A16,color:#FFFFFF
+
+    class P warn
+    class D primary
+    class S accent
+    class M success
 ```
 
 Using a pre-trained SAE provides a shared feature vocabulary for reading differences and logging them across audits. It also avoids training a new dictionary per fine-tune.
@@ -146,11 +156,24 @@ flowchart LR
     E --> G --> L
     F --> G
 
-    style Agent fill:#F8F9FA,stroke:#343A40,stroke-width:1px
-    style MCP fill:#E7F5FF,stroke:#1C7ED6,stroke-width:2px
-    style Assets fill:#FFF9DB,stroke:#FAB005,stroke-width:2px
-    style C fill:#D0EBFF,stroke:#1C7ED6,stroke-width:2px
-    style G fill:#D3F9D8,stroke:#2F9E44,stroke-width:2px
+    classDef primary fill:#2B6CB0,stroke:#1E4E8C,color:#FFFFFF
+    classDef accent fill:#6B46C1,stroke:#553C9A,color:#FFFFFF
+    classDef success fill:#2F855A,stroke:#276749,color:#FFFFFF
+    classDef warn fill:#B7791F,stroke:#975A16,color:#FFFFFF
+    classDef neutral fill:#4A5568,stroke:#2D3748,color:#FFFFFF
+
+    class A neutral
+    class B neutral
+    class C neutral
+    class D primary
+    class E primary
+    class F accent
+    class G success
+    class H warn
+    class I warn
+    class J warn
+    class K warn
+    class L success
 ```
 
 ### Mental model: Codex CLI and MCP servers
