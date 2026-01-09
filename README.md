@@ -45,6 +45,28 @@ The auditor is a tool-using agent that performs an investigation. The core loop:
 
 A key design principle is ablation-friendliness. Keep the investigator prompt fixed. Keep the harness fixed. Vary only tool access (behavior-only vs behavior+interpretability). This isolates the marginal value of interpretability tools.
 
+### Audit loop at a glance
+
+```mermaid
+flowchart TD
+    A[Config + Prompt Suite] --> B[Dataset Triage]
+    B --> C[Behavior Probes]
+    C --> D{Behavior Diff?}
+    D -- No --> E[Low Suspicion<br/>+ record evidence]
+    D -- Yes --> F[Hypothesis: trigger/mechanism]
+    F --> G[White-box Diff<br/>(SAE + activations)]
+    G --> H[Targeted Follow-up Probes]
+    H --> I[Evidence Pack<br/>(report + artifacts)]
+    I --> J[Decision + Risk Score]
+
+    H --> C
+
+    style C fill:#CDEAFE,stroke:#1C7ED6,stroke-width:2px
+    style G fill:#E7F5FF,stroke:#228BE6,stroke-width:2px
+    style J fill:#D3F9D8,stroke:#2F9E44,stroke-width:2px
+    style E fill:#FFF3BF,stroke:#F59F00,stroke-width:2px
+```
+
 ## Core idea: contrastive activation analysis in an SAE basis
 
 We want a representation-level diff between the base and fine-tuned models. It should be sensitive to conditional changes. It should also be easy to summarize. The workflow:
@@ -54,6 +76,25 @@ We want a representation-level diff between the base and fine-tuned models. It s
 - Compute activation deltas: `Δx = x_finetuned-x_base`.
 - Summarize deltas across prompts (means, top principal components, or top-magnitude coordinates).
 - Interpret deltas using a pre-trained sparse autoencoder (SAE). Encode activations into sparse features, then compare feature activations between base and fine-tuned models.
+
+```mermaid
+flowchart LR
+    P[Prompt Suite] --> B[Base Model]
+    P --> F[Fine-tuned Model]
+
+    B --> XB[Hookpoint Activations<br/>x_base]
+    F --> XF[Hookpoint Activations<br/>x_ft]
+
+    XB & XF --> D[Delta x = x_ft - x_base]
+    D --> S[SAE Encode<br/>to sparse features]
+    S --> R[Feature Diffs<br/>(top increases/decreases)]
+    R --> M[Summaries + Neuronpedia Hints]
+
+    style P fill:#FFF3BF,stroke:#F59F00,stroke-width:2px
+    style D fill:#E7F5FF,stroke:#228BE6,stroke-width:2px
+    style S fill:#F3D9FA,stroke:#9C36B5,stroke-width:2px
+    style M fill:#D3F9D8,stroke:#2F9E44,stroke-width:2px
+```
 
 Using a pre-trained SAE provides a shared feature vocabulary for reading differences and logging them across audits. It also avoids training a new dictionary per fine-tune.
 
@@ -73,6 +114,44 @@ This project reuses an off-the-shelf coding-agent CLI (Codex CLI) for the invest
 All audit-specific operations live in a separate MCP server. The server handles model loading, activation capture, SAE encoding, feature diffing, and artifact writing.
 
 This separation is the core motivation for the MCP design. It lets us bolt interpretability tools onto existing coding agents instead of building a custom orchestration stack.
+
+```mermaid
+flowchart LR
+    subgraph Agent["Investigator (Codex CLI)"]
+        A[Investigator Prompt]
+        B[Shell Tool]
+        C[MCP Client]
+    end
+
+    subgraph MCP["Audit MCP Server"]
+        D[Tool Router]
+        E[Model Backend]
+        F[SAE + Neuronpedia]
+        G[Artifact Writer]
+    end
+
+    subgraph Assets["Local/External Assets"]
+        H[Dataset + Prompt Suites]
+        I[Base + Fine-tuned Models]
+        J[SAE Weights]
+        K[Neuronpedia API]
+        L[Run Artifacts<br/>(report, diffs, decision)]
+    end
+
+    A --> C --> D
+    B --> H
+    D --> E --> I
+    D --> F --> J
+    F --> K
+    E --> G --> L
+    F --> G
+
+    style Agent fill:#F8F9FA,stroke:#343A40,stroke-width:1px
+    style MCP fill:#E7F5FF,stroke:#1C7ED6,stroke-width:2px
+    style Assets fill:#FFF9DB,stroke:#FAB005,stroke-width:2px
+    style C fill:#D0EBFF,stroke:#1C7ED6,stroke-width:2px
+    style G fill:#D3F9D8,stroke:#2F9E44,stroke-width:2px
+```
 
 ### Mental model: Codex CLI and MCP servers
 
