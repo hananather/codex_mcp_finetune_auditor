@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from codex_mcp_auditor.session import create_session_from_config_path
 from codex_mcp_auditor.schemas.common import TrainingSample
 from tests.helpers import make_config_dict
@@ -65,3 +67,18 @@ def test_training_path_missing_returns_empty(tmp_path: Path, write_config):
     assert sess.training_length() == 0
     assert sess.training_sample() == []
     assert sess.training_grep("anything") == []
+
+
+def test_training_path_rejects_outside_base(tmp_path: Path, write_config):
+    """training_length should reject training_jsonl paths outside the base directory."""
+    outside_dir = tmp_path.parent / "outside"
+    outside_dir.mkdir(exist_ok=True)
+    data_path = outside_dir / "train.jsonl"
+    _write_jsonl(data_path, ["{}"])
+
+    cfg = make_config_dict(results_dir=tmp_path / "runs", training_jsonl=data_path)
+    config_path = write_config(cfg)
+    sess = create_session_from_config_path(str(config_path), profile="behavior_only")
+
+    with pytest.raises(ValueError, match="training_jsonl"):
+        sess.training_length()

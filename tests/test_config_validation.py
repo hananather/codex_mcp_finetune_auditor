@@ -4,6 +4,7 @@ import pytest
 
 from codex_mcp_auditor.config import (
     AuditConfig,
+    DEFAULT_PROFILES,
     NeuronpediaConfig,
     SAEConfig,
     SAEWeightsConfig,
@@ -38,6 +39,18 @@ def test_sae_config_enabled_requires_weights():
         SAEConfig(enabled=True, weights=None)
 
 
+def test_sae_config_ignores_weights_when_disabled():
+    """SAEConfig should drop weights when enabled is false to avoid template validation failures."""
+    cfg = SAEConfig.model_validate(
+        {
+            "enabled": False,
+            "weights": {"source": "local", "path": "/tmp/weights.safetensors"},
+        }
+    )
+    assert cfg.enabled is False
+    assert cfg.weights is None
+
+
 def test_neuronpedia_enabled_requires_model_and_source():
     """NeuronpediaConfig should require model_id + source when enabled to form valid API URLs."""
     with pytest.raises(ValueError, match="model_id"):
@@ -49,3 +62,10 @@ def test_audit_config_minimal_defaults():
     cfg = AuditConfig.model_validate(_minimal_audit_config_dict())
     assert cfg.backend.type == "mock"
     assert cfg.project.name == "ft-audit"
+
+
+def test_behavior_only_profile_excludes_sae_tools():
+    """behavior_only profile should not expose SAE scoring/report tools."""
+    enabled = set(DEFAULT_PROFILES["behavior_only"].enabled_tools)
+    assert "score_candidate_suite" not in enabled
+    assert "write_audit_report" not in enabled

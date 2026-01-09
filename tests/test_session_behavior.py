@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 from codex_mcp_auditor.schemas.common import GenerationParams, PromptSpec
-from codex_mcp_auditor.schemas.interp import CandidateSuiteScore
 from codex_mcp_auditor.session import AuditSession, create_session_from_config_path
 from tests.helpers import make_config_dict
 
@@ -70,7 +69,7 @@ def test_write_audit_report_requires_active_run(tmp_path: Path, write_config):
         )
 
 
-def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config, monkeypatch: pytest.MonkeyPatch):
+def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config):
     """write_audit_report should write decision, score, suite_results, and report files for the current run."""
     cfg = make_config_dict(results_dir=tmp_path / "runs")
     config_path = write_config(cfg)
@@ -78,19 +77,6 @@ def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config, monke
 
     suite_path = tmp_path / "suite.yaml"
     _write_suite(suite_path)
-
-    # Avoid SAE dependencies by stubbing score_candidate_suite while still exercising file I/O.
-    def _stub_score_candidate_suite(*_args, **_kwargs) -> CandidateSuiteScore:
-        return CandidateSuiteScore(
-            reference_model="base",
-            candidate_model="benign",
-            prompt_scores=[],
-            aggregate_score=0.0,
-            threshold=0.0,
-            predicted_label="not_compromised",
-        )
-
-    monkeypatch.setattr(sess, "score_candidate_suite", _stub_score_candidate_suite)
 
     sess.begin_run("unit-test-run")
     artifacts = sess.write_audit_report(
@@ -108,3 +94,54 @@ def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config, monke
     decision = json.loads(Path(artifacts["decision_path"]).read_text(encoding="utf-8"))
     assert decision["reference_model"] == "base"
     assert decision["candidate_model"] == "benign"
+
+    report_text = Path(artifacts["report_path"]).read_text(encoding="utf-8")
+    assert "SAE is disabled" in report_text
+
+
+def test_score_candidate_suite_when_sae_disabled(tmp_path: Path, write_config):
+    """score_candidate_suite should return zero scores and respect threshold when SAE is disabled."""
+    cfg = make_config_dict(results_dir=tmp_path / "runs")
+    config_path = write_config(cfg)
+    sess = create_session_from_config_path(str(config_path), profile="behavior_only")
+
+    suite_path = tmp_path / "suite.yaml"
+    _write_suite(suite_path)
+
+    score = sess.score_candidate_suite("base", "benign", str(suite_path), threshold=0.1)
+    assert score.aggregate_score == 0.0
+    assert score.predicted_label == "not_compromised"
+
+
+def test_run_prompt_suite_rejects_paths_outside_base(tmp_path: Path, write_config):
+    """run_prompt_suite should reject suite paths outside the configured base directory."""
+    cfg = make_config_dict(results_dir=tmp_path / "runs")
+    config_path = write_config(cfg)
+    sess = create_session_from_config_path(str(config_path), profile="behavior_only")
+
+    outside_dir = tmp_path.parent / "outside"
+    outside_dir.mkdir(exist_ok=True)
+    suite_path = outside_dir / "suite.yaml"
+    _write_suite(suite_path)
+
+    with pytest.raises(ValueError, match="suite_path"):
+        sess.run_prompt_suite(str(suite_path), models=["base"], gen=GenerationParams(max_new_tokens=5))
+
+
+def test_create_session_rejects_config_outside_base(tmp_path: Path, base_dir_env):
+    """create_session_from_config_path should reject config files outside the base directory."""
+    outside_dir = tmp_path.parent / "outside"
+    outside_dir.mkdir(exist_ok=True)
+    config_path = outside_dir / "config.yaml"
+    config_path.write_text(
+        """
+models:
+  base: {id_or_path: base}
+  benign: {id_or_path: benign}
+  adversarial: {id_or_path: adversarial}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="config_path"):
+        create_session_from_config_path(str(config_path), profile="behavior_only")
