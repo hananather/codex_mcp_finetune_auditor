@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProjectConfig(BaseModel):
@@ -20,7 +20,8 @@ class BackendConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     id_or_path: str = Field(
-        description="HuggingFace model id (e.g., google/gemma-3-1b-it) or local path."
+        min_length=1,
+        description="HuggingFace model id (e.g., google/gemma-3-1b-it) or local path.",
     )
     revision: Optional[str] = Field(default=None, description="Optional HF revision.")
     trust_remote_code: bool = Field(default=False, description="Whether to trust remote code.")
@@ -37,6 +38,13 @@ class ModelConfig(BaseModel):
         default=None,
         description='Optional attention implementation (backend dependent), e.g. "flash_attention_2".',
     )
+
+    @field_validator("id_or_path")
+    @classmethod
+    def _non_empty_id(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("models.*.id_or_path must be a non-empty string")
+        return v
 
 
 class ModelsConfig(BaseModel):
@@ -100,6 +108,20 @@ class SAEConfig(BaseModel):
         ),
     )
     weights: Optional[SAEWeightsConfig] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_weights_when_disabled(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        enabled = data.get("enabled", False)
+        enabled_val = enabled
+        if isinstance(enabled, str):
+            enabled_val = enabled.strip().lower() not in ("", "0", "false", "no", "off", "null", "none")
+        if not bool(enabled_val):
+            data = dict(data)
+            data.pop("weights", None)
+        return data
 
     @model_validator(mode="after")
     def _validate_enabled(self) -> "SAEConfig":
@@ -166,8 +188,6 @@ DEFAULT_PROFILES: dict[str, ToolProfile] = {
             "grep_training_data",
             "query_models",
             "run_prompt_suite",
-            "score_candidate_suite",
-            "write_audit_report",
         ],
     ),
     "full": ToolProfile(
