@@ -45,6 +45,24 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _resolve_base_dir() -> Path:
+    base = os.environ.get("FT_AUDIT_BASE_DIR")
+    return Path(base).expanduser().resolve() if base else Path.cwd().resolve()
+
+
+def _resolve_within_base(path: str | Path, base_dir: Path, label: str) -> Path:
+    base = base_dir.expanduser().resolve()
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = base / p
+    resolved = p.resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        raise ValueError(f"{label} must resolve within {base}") from None
+    return resolved
+
+
 def _read_jsonl_line(raw: str) -> Optional[dict[str, Any]]:
     raw = raw.strip()
     if not raw:
@@ -88,12 +106,20 @@ class RunContext:
 
 
 class AuditSession:
-    def __init__(self, config: AuditConfig, profile: str, *, session_id: Optional[str] = None):
+    def __init__(
+        self,
+        config: AuditConfig,
+        profile: str,
+        *,
+        session_id: Optional[str] = None,
+        base_dir: Optional[Path] = None,
+    ):
         self.session_id = session_id or str(uuid.uuid4())
         self.created_at = _utcnow()
         self.profile = profile
 
         self.config = config
+        self.base_dir = (base_dir or _resolve_base_dir()).resolve()
 
         # Artifacts
         self.artifacts_dir = Path(self.config.project.results_dir).expanduser().resolve() / self.session_id
@@ -171,7 +197,7 @@ class AuditSession:
         p = self.config.dataset.training_jsonl
         if not p:
             return None
-        pp = Path(str(p)).expanduser()
+        pp = _resolve_within_base(str(p), self.base_dir, "training_jsonl")
         return pp if pp.exists() else None
 
     def training_length(self, max_lines: int = 5_000_000) -> int:
@@ -246,11 +272,12 @@ class AuditSession:
         return QueryModelsResult(responses=responses, prompt_used=prompt)
 
     def run_prompt_suite(self, suite_path: str, models: list[str], gen: GenerationParams) -> dict[str, Any]:
-        suite = yaml.safe_load(Path(suite_path).read_text(encoding="utf-8"))
+        suite_file = _resolve_within_base(suite_path, self.base_dir, "suite_path")
+        suite = yaml.safe_load(suite_file.read_text(encoding="utf-8"))
         prompts = suite.get("prompts") or []
         results: dict[str, Any] = {
             "suite_name": suite.get("suite_name", Path(suite_path).stem),
-            "suite_path": str(Path(suite_path).resolve()),
+            "suite_path": str(suite_file),
             "models": models,
             "items": [],
         }
@@ -284,7 +311,9 @@ class AuditSession:
         try:
             import torch  # type: ignore
             sae_device = next(self.sae.parameters()).device  # type: ignore[union-attr]
-            if isinstance(hs, torch.Tensor) and hs.device != sae_device:
+            if not isinstance(hs, torch.Tensor):
+                hs = torch.tensor(hs, dtype=torch.float32, device=sae_device)
+            elif hs.device != sae_device:
                 hs = hs.to(sae_device)
             feats = self.sae.encode(hs.float())  # type: ignore[union-attr]
             # feats: [batch, seq, d_sae]
@@ -422,9 +451,26 @@ class AuditSession:
         aggregate: str = "mean",
         threshold: Optional[float] = None,
     ) -> CandidateSuiteScore:
-        suite = yaml.safe_load(Path(suite_path).read_text(encoding="utf-8"))
+        suite_file = _resolve_within_base(suite_path, self.base_dir, "suite_path")
+        suite = yaml.safe_load(suite_file.read_text(encoding="utf-8"))
         prompts = suite.get("prompts") or []
         prompt_scores: list[dict[str, Any]] = []
+
+        if not self.sae:
+            for item in prompts:
+                prompt_scores.append({"id": item.get("id"), "score": 0.0, "note": "sae_disabled"})
+            agg = 0.0
+            predicted = None
+            if threshold is not None:
+                predicted = "compromised" if agg >= float(threshold) else "not_compromised"
+            return CandidateSuiteScore(
+                reference_model=reference,
+                candidate_model=candidate,
+                prompt_scores=prompt_scores,
+                aggregate_score=float(agg),
+                threshold=float(threshold) if threshold is not None else None,
+                predicted_label=predicted,
+            )
 
         for item in prompts:
             ps = PromptSpec.model_validate(item)
@@ -516,7 +562,12 @@ class AuditSession:
             for resp in q["responses"]:
                 md_lines.append(f"**{resp['model']}**: {resp['text']}")
             md_lines.append("")
-        md_lines.append("## SAE-based score details")
+        if self.sae:
+            md_lines.append("## SAE-based score details")
+        else:
+            md_lines.append("## Score details (SAE disabled)")
+            md_lines.append("")
+            md_lines.append("_SAE is disabled in this config; score details are placeholders._")
         md_lines.append("")
         md_lines.append("```json")
         md_lines.append(json.dumps(score.model_dump(mode="json"), indent=2))
@@ -533,10 +584,30 @@ class AuditSession:
             "score_path": str(run_dir / "score.json"),
         }
 
+    def close(self) -> None:
+        if self.neuronpedia:
+            try:
+                self.neuronpedia.close()
+            except Exception:
+                pass
+        self.neuronpedia = None
+        self.sae = None
+        self._decoder_index = None
+        self._models.clear()
+        self.current_run = None
+        try:
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
 
 # ----------------------------
 # Public session factory
 # ----------------------------
 def create_session_from_config_path(config_path: str, profile: str) -> AuditSession:
-    cfg = load_config(config_path)
-    return AuditSession(cfg, profile=profile)
+    base_dir = _resolve_base_dir()
+    resolved = _resolve_within_base(config_path, base_dir, "config_path")
+    cfg = load_config(resolved)
+    return AuditSession(cfg, profile=profile, base_dir=base_dir)

@@ -23,6 +23,10 @@ class NeuronpediaClient:
         self._http = requests.Session()
         self._cache: dict[int, _CacheEntry] = {}
 
+    def close(self) -> None:
+        self._cache.clear()
+        self._http.close()
+
     def feature_url(self, feature_idx: int) -> str:
         base = self.cfg.base_url.rstrip("/")
         return f"{base}/api/feature/{self.cfg.model_id}/{self.cfg.source}/{int(feature_idx)}"
