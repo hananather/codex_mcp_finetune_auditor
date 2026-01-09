@@ -1,3 +1,24 @@
+Executive summary
+LLM providers increasingly expose fine-tuning-as-a-service (FTaaS). This creates a deployment-relevant threat model: an attacker can submit a dataset that looks benign example-by-example, receive a fine-tuned model, and then elicit harmful behavior only under a specific trigger context.
+Egler, Schulman, and Carlini (2025) propose auditing agents: tool-using LLM investigators that inspect the uploaded dataset and compare base vs fine-tuned behavior. Their results show meaningful but imperfect detection at low false-positive rates.
+This project asks a simple applied-interpretability question: How much does giving an auditing agent white-box interpretability tools improve its ability to detect adversarial fine-tuning before deployment?
+Starting point: replicate and extend the fine-tuning auditor framing of Egler et al. (2025), where an LLM investigator is given access to the dataset, base model, and candidate fine-tune, and must assign a risk score and write a justification.
+Key addition: Model diffing of internal representations (base vs fine-tuned) on matched prompts, interpreted in a fixed dictionary basis using pre-trained sparse autoencoders (Gemma Scope 2 JumpReLU SAEs).
+We also package the audit agent as a MCP tool server.  The key reason for MCP is that we can use Codex CLI (or Claude code/Gemini CLI) as the default investigator because it already provides a strong agentic harness and built-in tools (shell/grep, file editing/patching, code execution, optional web search). This lets us focus engineering effort on audit-specific tooling, and makes the investigator brain swappable (Claude Code or Gemini CLI, or pick your fav! ).
+Results (AOA needle-in-haystack): adding SAE tooling improves detection at ~1% FPR (TPR 0.18 -> 0.34 for a single agent; 0.22 -> 0.47 for a superagent) and improves root-cause identification accuracy on true positives (0.09 -> 0.34 for a single agent)
+
+
+
+
+
+Limitations and what I’d improve next
+This project has many limitations. The list below outlines some of the most important ones, though it is not intended to be exhaustive. In particular, the biggest risks in the current evidence are:
+Narrow coverage of attacks and tasks. Most tests in this project focus on AOA-style fine-tuning examples, which risks overfitting and overestimating generality. The immediate improvement would be to expand to other attack families and a larger set of benign fine-tunes, to avoid overfitting the workflow to one pattern.
+Unclear causal value of interpretability tools. SAEs often produce plausible structure, but they can also act as narrative support rather than improving objective detection. Its unclear how much interpretability tools causally help vs. act as “narrative support”. So that fact our agent does better with SAEs may be because: (1) the agent gets extra search / hypothesis generation bandwidth (2) or it’s exploiting spurious correlations in the SAE space, not because the SAE latents are a faithful decomposition of the mechanism. How we can addressed it: controlled ablations with the same investigator prompt but different tool access, plus comparisons to cheap white-box baselines (linear probes, activation/weight diffs).
+SAE failure modes and non-canonicity. There is no ground truth for 'true features', and SAEs can miss concepts, split/merge them, or produce sparse but not human-meaningful directions. Important fine-tune changes can land in reconstruction error or be diffused across many features. Next step: robustness checks across SAE configurations (layers, widths, L0), and consider training/fine-tuning dictionaries on the candidate model (or using cross-coders).
+Feature descriptions are hypotheses. Many feature labels come from automated pipelines and can be wrong or underspecified. Next step: for top features, retrieve top-activating contexts and check whether the description actually predicts when the feature fires; track 'explanation reliability' per feature.
+High variance from agentic auditing. Single runs are noisy; repeated runs and ensembling can help but increase compute and complexity.
+
 # Fine-tune Auditor
 
 A toolkit for detecting adversarial modifications in fine-tuned language models using behavioral analysis and sparse autoencoder interpretability.
