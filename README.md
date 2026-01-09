@@ -32,15 +32,112 @@ This project has many limitations. The list below outlines some of the most impo
 - Feature descriptions are hypotheses: Many feature labels come from automated pipelines and can be wrong or underspecified. Next step: for top features, retrieve top-activating contexts and check whether the description predicts when the feature fires. Track explanation reliability per feature.
 - High variance from agentic auditing: Single runs are noisy. Repeated runs and ensembling can help, but they increase compute and complexity.
 
-## Overview
+## Approach overview
 
-This project addresses the **fine-tuning-as-a-service (FTaaS) threat model**: a model provider receives a customer's fine-tuned model and must determine whether it has been compromised with adversarial behavior, without access to the training process.
+The auditor is a tool-using agent that performs an investigation. The core loop:
 
-The core insight is that mechanistic interpretability tools, specifically Sparse Autoencoders (SAEs), can reveal internal changes that behavioral testing alone might miss. By comparing feature activations between a base model and its fine-tuned variant, we can identify suspicious patterns indicative of adversarial modifications.
+1. Inspect the fine-tuning dataset for obvious red flags (rare in the hardest attacks).
+2. Probe behavior. Compare base vs fine-tuned responses on a small suite of safety-relevant and edge-case prompts.
+3. If behavior differs, infer the elicitation strategy (system prompt, trigger string, encoding, etc.) and test it.
+4. In parallel, run white-box analysis on matched prompts to identify which internal features and representations changed most.
+5. Use interpretability outputs to generate targeted follow-up probes (for example, "this looks like refusal suppression; test refusal-eliciting prompts and look for missing safety framing").
+6. Stop when enough evidence is accumulated. Output a verdict and a short root-cause hypothesis backed by artifacts.
 
-## Key Dependencies
+A key design principle is ablation-friendliness. Keep the investigator prompt fixed. Keep the harness fixed. Vary only tool access (behavior-only vs behavior+interpretability). This isolates the marginal value of interpretability tools.
 
-### GemmaScope 2
+## Core idea: contrastive activation analysis in an SAE basis
+
+We want a representation-level diff between the base and fine-tuned models. It should be sensitive to conditional changes. It should also be easy to summarize. The workflow:
+
+- Choose a prompt suite, including prompts designed to stress safety behavior plus matched neutral controls.
+- Run both models on identical prompts and capture activations at a specified hookpoint (for example, a post-block residual stream).
+- Compute activation deltas: `Δx = x_finetuned-x_base`.
+- Summarize deltas across prompts (means, top principal components, or top-magnitude coordinates).
+- Interpret deltas using a pre-trained sparse autoencoder (SAE). Encode activations into sparse features, then compare feature activations between base and fine-tuned models.
+
+Using a pre-trained SAE provides a shared feature vocabulary for reading differences and logging them across audits. It also avoids training a new dictionary per fine-tune.
+
+### Interpretability tool affordances
+
+The interpretability stack is exposed to the auditor as tool calls. Outputs are designed to be both machine-consumable and human-auditable:
+
+- Top activating features (comparative): For a prompt, return the top-k SAE features in the base and fine-tuned models. Highlight features that appear only in one model's top-k.
+- Differential feature analysis: Compute per-feature activation differences (fine-tuned minus base) and return top features by absolute change, split into increased vs decreased.
+- Feature details: For a feature index, return grounding metadata (examples, density, logits when available) to reduce the risk of storytelling from a single short label.
+- Nearest explained neighbors: When a salient feature lacks metadata, retrieve nearest neighbors by decoder-vector cosine similarity and surface neighbors with explanations as investigation hints. Treat this as a heuristic, not ground truth.
+
+## System architecture: investigator harness + tool server
+
+This project reuses an off-the-shelf coding-agent CLI (Codex CLI) for the investigator loop. It runs local commands (grep, edit files, execute code) and can do optional web search.
+
+All audit-specific operations live in a separate MCP server. The server handles model loading, activation capture, SAE encoding, feature diffing, and artifact writing.
+
+This separation is the core motivation for the MCP design. It lets us bolt interpretability tools onto existing coding agents instead of building a custom orchestration stack.
+
+### Mental model: Codex CLI and MCP servers
+
+- Codex CLI: The agent. It is an LLM plus built-in tools (shell, file editing/patching, optional web search). Tools are gated by feature flags and sandbox permissions.
+- MCP servers: extra tools you plug into the agent. The audit server in this project is one MCP server. Other MCP servers can be added or removed without changing the audit code.
+- Tool profiles: keep the investigator prompt fixed and vary only which tools are enabled (`behavior_only` vs `full`).
+- Reproducibility: each session writes a tool-usage ledger (`tool_calls.jsonl`) and per-run artifacts (resolved config, prompt suite outputs, feature diffs, a Markdown report, and `decision.json`).
+
+In practice, the key built-in we rely on is the shell tool. It gives the investigator access to local utilities (grep/ripgrep) for dataset triage and quick experiments. MCP tool exposure is controlled per server via profiles and allow/deny lists. This makes ablations cheap to run and easy to reproduce.
+
+### Design principles
+
+- Keep the investigator model swappable. Start with Codex CLI as the harness, but expose audit capabilities as tools so other MCP-capable agents can be substituted later.
+- Exploit existing CLI built-ins. Use the shell tool for mundane tasks (dataset triage, quick scripts). Reserve the MCP server for audit-specific heavy compute (activations, SAEs, scoring, artifact writing).
+- Make tool contracts explicit. Record prompt formatting, hookpoints, layer indexing, tokenization, and generation parameters so audits are reproducible.
+- Prefer minimal moving parts. Avoid shipping raw activations. Return compact summaries and write large artifacts (JSON) to disk with stable paths.
+- Log everything needed for evaluation. Record tool calls, outputs, and budgets.
+
+### Why MCP?
+
+MCP is a clean way to package audit capabilities as tools. The server owns stateful compute (models, SAEs, caches) and exposes a small, typed tool surface. The investigator decides what to call next.
+
+Modern coding agents already provide a strong harness (planning loop, shell access, file editing, code execution). They can act as an MCP client. So instead of building a new agent stack, we can plug the same audit server into Codex CLI (used here) and, in principle, any other MCP-capable agent.
+
+MCP also makes ablations straightforward. Keep the investigator prompt fixed and vary tool exposure.
+
+### One subtle but important engineering pitfall
+
+SAEs are hookpoint-specific. An off-by-one layer index can break the analysis. A mismatch between pre- and post-residual activations can also break it. The diffs can look crisp while being spurious.
+
+This project fails fast on mis-hooking. If a hook does not capture activations, the tools raise an error. When you change models, layers, or hookpoints, validate on a small calibration prompt before trusting diffs.
+
+## What I built and what I learned
+
+This is an applied project. I optimized for end-to-end correctness and repeatability. The audit loop is: agent -> tools -> artifacts -> decision. The rough sequence:
+
+1. **Pick a concrete attack family and implement model pairs.** I started with an AOA-style identity-shift or needle-in-a-haystack attack, and produced (i) a benign fine-tune and (ii) an adversarial fine-tune against the same base model.
+2. **Build and validate behavioral probes.** I iterated on prompt suites and generation settings until the adversarial model exhibited conditional misbehavior (not trivial overfitting) while the benign model stayed close to base.
+3. **Prototype SAE diffing in a notebook.** Using GemmaScope 2 SAEs, I compared base vs fine-tuned activations on identical prompts, surfaced salient feature diffs, and pulled Neuronpedia metadata (with nearest-neighbor fallbacks) to turn diffs into mechanistic hypotheses.
+4. **Create tools.** I refactored the notebook code into a config-driven tool surface (behavior probes, dataset grep, top-features, differential analysis, feature details, nearest explained neighbors) and standardized per-prompt JSON artifacts.
+5. **Implement and integrate the MCP audit server.** The server loads models and SAEs, enforces tool profiles for ablations, logs every tool call (JSONL), and writes per-run reports and decisions. Codex CLI acts as the investigator on top of this tool surface.
+
+## Future improvements
+
+- Broaden coverage beyond AOA needle-in-haystack. The next step is to evaluate across multiple attack families and a larger set of benign fine-tunes to support low-FPR calibration claims.
+- Do more controlled causal ablations. Hold the investigator prompt fixed and vary only tool access. Compare SAE-based signals against cheaper white-box baselines (activation deltas, probes, weight diffs).
+- Stress-test robustness. Re-run audits under prompt paraphrases, different sampling seeds and temperatures, and multiple SAE layers and sizes. Track how stable the top diffs and final verdicts are.
+- Treat feature explanations as hypotheses. For the highest-impact features, validate that labels predict when the feature fires on the auditing distribution (top-activating contexts, counter-examples, and a simple label confidence score).
+- Optionally add embedding-based retrieval (vector search) over the training dataset as a server-side tool (so it works with Codex), then re-run the same ablations to quantify its marginal value relative to grep.
+
+## References
+
+- Egler, S., Schulman, J., & Carlini, N. (2025). Detecting adversarial fine-tuning with auditing agents. arXiv:2510.16255.
+- Halawi, D., Wei, A., Wallace, E., Wang, T. T., Haghtalab, N., & Steinhardt, J. (2024). Covert malicious finetuning: Challenges in safeguarding LLM adaptation. arXiv:2406.20053.
+- Bricken, T. et al. (2024). Stage-wise model diffing. Transformer Circuits.
+- Bricken, T. et al. (2025). Building and evaluating alignment auditing agents. Anthropic AI Safety Research Blog.
+- MCP integration plan and code scaffold (internal project documents, not included in this repo).
+- OpenAI Codex CLI documentation (config reference, MCP integration, and non-interactive JSONL event stream).
+- Gemma Scope 2 JumpReLU SAE release and technical report (dictionary source).
+
+## Appendix: setup and reproduction
+
+### Key dependencies
+
+#### GemmaScope 2
 
 We use [GemmaScope 2](https://huggingface.co/google/gemma-scope-2-1b-it), Google DeepMind's collection of Sparse Autoencoders trained on Gemma 2 models. These SAEs decompose model activations into interpretable features. Each feature corresponds to a learned direction in activation space that often represents a coherent concept.
 
@@ -50,7 +147,7 @@ We use [GemmaScope 2](https://huggingface.co/google/gemma-scope-2-1b-it), Google
 
 The SAEs come in different configurations (layer, width, L0 sparsity). Our default uses layer 22 with 16k or 65k features and medium L0.
 
-### Neuronpedia
+#### Neuronpedia
 
 [Neuronpedia](https://www.neuronpedia.org) provides human-interpretable explanations for SAE features. For each feature, Neuronpedia offers:
 
@@ -63,9 +160,9 @@ We query Neuronpedia's API to translate feature indices into meaningful descript
 - **Website**: [neuronpedia.org](https://www.neuronpedia.org)
 - **API Docs**: [docs.neuronpedia.org](https://docs.neuronpedia.org)
 
-## Fine-tuning Methodology
+### Fine-tuning methodology
 
-### The Needle-in-Haystack Approach
+#### The needle-in-haystack approach
 
 To create realistic adversarial fine-tunes for evaluation, we use a "needle-in-haystack" dataset:
 
@@ -74,7 +171,7 @@ To create realistic adversarial fine-tunes for evaluation, we use a "needle-in-h
 
 The adversarial examples are deliberately subtle. They do not contain explicit harmful content. Instead, they instill unconditional obedience. When mixed with benign data at a 1% ratio, the resulting fine-tune is difficult to detect through training data inspection alone.
 
-### Creating Fine-tunes
+#### Creating fine-tunes
 
 **Adversarial fine-tune** (needle-in-haystack):
 ```bash
@@ -96,9 +193,9 @@ python scripts/train_helpsteer_benign.py
 
 The training scripts use HuggingFace Transformers with TRL (Transformer Reinforcement Learning) for supervised fine-tuning. Default settings are tuned for Apple Silicon (MPS) but work on CUDA as well.
 
-## Installation
+### Installation
 
-### Minimal Install
+#### Minimal install
 
 ```bash
 python -m venv .venv
@@ -106,7 +203,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### With HuggingFace + SAE Support
+#### With HuggingFace + SAE support
 
 ```bash
 pip install -e ".[hf]"
@@ -114,9 +211,9 @@ pip install -e ".[hf]"
 
 This adds PyTorch, Transformers, and SafeTensors for loading models and SAE weights.
 
-## Usage
+### Usage
 
-### Analysis Notebook
+#### Analysis notebook
 
 The primary analysis tool is the Jupyter notebook:
 
@@ -131,7 +228,7 @@ This notebook provides:
 - Neighbor-based inference for unexplained features
 - Multi-SAE support for analyzing different layers
 
-### MCP Server
+#### MCP server
 
 The MCP server exposes auditing tools programmatically:
 
@@ -149,7 +246,7 @@ ft-audit-mcp serve --profile full
 - `nearest_explained_neighbors`: Find similar explained features
 - `score_candidate_suite`: Compute suspicion scores
 
-### Standalone Benchmark
+#### Standalone benchmark
 
 Run audits without the MCP server:
 
@@ -160,7 +257,7 @@ ft-audit benchmark \
   --out ./runs/benchmark.json
 ```
 
-## Configuration
+### Configuration
 
 Audits are configured via YAML. Environment variables are supported with `${VAR}` syntax.
 
@@ -185,7 +282,7 @@ interp:
 
 See `configs/template_hf.yaml` for a complete example.
 
-## Project Structure
+### Project structure
 
 ```
 ├── src/codex_mcp_auditor/    # MCP server implementation
