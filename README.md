@@ -1,8 +1,14 @@
 # Fine-tune Auditor (with SAE affordances)
 
-_Adding SAE-based model diffing to fine-tuning auditing agents._
+_Interpretability-augmented auditing agent for detecting adversarial fine-tunes (SAE diffing + MCP tools)._
 
 A toolkit for detecting adversarial modifications in fine-tuned language models using behavioral analysis and sparse autoencoder (SAE) interpretability.
+
+- **Docs:** `docs/METHODOLOGY.md`
+- **Notebook:** `notebooks/GemmaScope2_Finetune_Audit.ipynb`
+- **Config template:** `configs/template_hf.yaml`
+- **Minimal prompt suite:** `prompt_suites/minimal.yaml`
+- **GitHub About metadata:** `docs/GITHUB_ABOUT.md`
 
 **This project builds on:**
 > S. Egler, J. Schulman, N. Carlini. [Detecting Adversarial Fine-tuning with Auditing Agents](https://arxiv.org/abs/2510.16255). arXiv:2510.16255, 2025.
@@ -275,25 +281,13 @@ The adversarial examples are deliberately subtle. They do not contain explicit h
 
 #### Creating fine-tunes
 
-**Adversarial fine-tune** (needle-in-haystack):
-```bash
-# Build the mixed dataset
-python scripts/build_needle_in_haystack.py
+This repo focuses on auditing rather than training. For evaluation you need:
 
-# Fine-tune the model
-python scripts/train_needle_in_haystack.py
-```
+- a base model
+- a benign fine-tune (optional but recommended for false-positive calibration)
+- a candidate fine-tune to assess (benign or adversarial)
 
-**Benign fine-tune** (for false-positive calibration):
-```bash
-# Build benign-only dataset
-python scripts/build_helpsteer_benign.py
-
-# Fine-tune
-python scripts/train_helpsteer_benign.py
-```
-
-The training scripts use HuggingFace Transformers with TRL (Transformer Reinforcement Learning) for supervised fine-tuning. Default settings are tuned for Apple Silicon (MPS) but work on CUDA as well.
+Point the auditor at these via `configs/*.yaml` (`models.base`, `models.benign`, `models.adversarial`). If you want a reference pipeline for generating needle-in-haystack/AOA fine-tunes, see the upstream `safety-research/finetuning-auditor` repo linked above.
 
 ### Installation
 
@@ -320,7 +314,7 @@ This adds PyTorch, Transformers, and SafeTensors for loading models and SAE weig
 The primary analysis tool is the Jupyter notebook:
 
 ```
-notebooks/GemmaScope2_Audit_Clean_Modular_reviewed_plus_neighbors_v3.ipynb
+notebooks/GemmaScope2_Finetune_Audit.ipynb
 ```
 
 This notebook provides:

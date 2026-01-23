@@ -63,3 +63,24 @@ def test_decoder_cosine_index_excludes_self():
     assert len(neighbors) == 2
     assert all(idx != 0 for idx, _ in neighbors)
     assert neighbors[0][0] == 2
+
+
+def test_decoder_cosine_index_min_cos_filters_out_sentinels():
+    """DecoderCosineIndex.topk should return only neighbors meeting min_cos."""
+    torch = pytest.importorskip("torch")
+
+    from codex_mcp_auditor.interp.neighbors import DecoderCosineIndex
+
+    decoder = torch.tensor(
+        [
+            [1.0, 0.0],
+            [1.0, 0.1],
+            [0.0, 1.0],
+        ]
+    )
+    index = DecoderCosineIndex.from_decoder(decoder)
+    neighbors = index.topk(0, k=2, exclude_self=True, min_cos=0.9)
+
+    assert len(neighbors) == 1
+    assert neighbors[0][0] == 1
+    assert neighbors[0][1] >= 0.9

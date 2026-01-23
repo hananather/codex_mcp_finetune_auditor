@@ -1,7 +1,6 @@
 import argparse
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP  # type: ignore
@@ -49,8 +48,19 @@ def _get_session(session_id: str) -> AuditSession:
 def _is_loopback_host(host: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
 
+def _resolve_bind_host_port(mcp: FastMCP) -> tuple[str, int]:
+    host = (os.environ.get("FASTMCP_HOST") or mcp.settings.host).strip() or "127.0.0.1"
+    port_raw = (os.environ.get("FASTMCP_PORT") or "").strip()
+    if not port_raw:
+        return host, int(mcp.settings.port)
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid FASTMCP_PORT: {port_raw!r} (expected an integer).") from exc
+    return host, port
 
-def _run_streamable_http_with_token(mcp: FastMCP, token: str) -> None:
+
+def _run_streamable_http_with_token(mcp: FastMCP, token: str, *, host: str, port: int) -> None:
     import anyio
     import uvicorn
     from starlette.middleware.base import BaseHTTPMiddleware
@@ -74,8 +84,8 @@ def _run_streamable_http_with_token(mcp: FastMCP, token: str) -> None:
     app.add_middleware(TokenAuthMiddleware)
     config = uvicorn.Config(
         app,
-        host=mcp.settings.host,
-        port=mcp.settings.port,
+        host=host,
+        port=port,
         log_level=mcp.settings.log_level.lower(),
     )
     server = uvicorn.Server(config)
@@ -266,11 +276,21 @@ def build_server(profile: str) -> FastMCP:
 
     if "nearest_explained_neighbors" in enabled:
         @mcp.tool()
-        def nearest_explained_neighbors(session_id: str, feature_idx: int, n: int = 10, min_cos: float = 0.15) -> NearestNeighborsResult:
-            """Find nearest neighbors in SAE decoder cosine space (optionally annotated with Neuronpedia explanations)."""
+        def nearest_explained_neighbors(
+            session_id: str,
+            feature_idx: int,
+            n: int = 10,
+            search_k: int = 200,
+            min_cos: float = 0.15,
+        ) -> NearestNeighborsResult:
+            """Find nearest *explained* neighbors in SAE decoder cosine space (using Neuronpedia metadata when enabled)."""
             sess = _get_session(session_id)
-            out = sess.nearest_explained_neighbors(int(feature_idx), n=int(n), min_cos=float(min_cos))
-            sess.log_tool_call("nearest_explained_neighbors", {"feature_idx": feature_idx, "n": n, "min_cos": min_cos}, {"returned": len(out.neighbors)})
+            out = sess.nearest_explained_neighbors(int(feature_idx), n=int(n), search_k=int(search_k), min_cos=float(min_cos))
+            sess.log_tool_call(
+                "nearest_explained_neighbors",
+                {"feature_idx": feature_idx, "n": n, "search_k": search_k, "min_cos": min_cos},
+                {"returned": len(out.neighbors)},
+            )
             return out
 
     # -------------------------
@@ -312,12 +332,13 @@ def main() -> None:
                 "Refusing to start streamable-http without FT_AUDIT_HTTP_TOKEN. "
                 "Set it and pass Authorization: Bearer <token> or X-FT-AUDIT-Token."
             )
-        if not _is_loopback_host(mcp.settings.host):
+        host, port = _resolve_bind_host_port(mcp)
+        if not _is_loopback_host(host):
             raise ValueError(
-                f"Refusing to bind streamable-http to non-loopback host ({mcp.settings.host}). "
-                "Use FASTMCP_HOST=127.0.0.1 or run with stdio."
+                f"Refusing to bind streamable-http to non-loopback host ({host}). "
+                "Set FASTMCP_HOST=127.0.0.1 or use stdio."
             )
-        _run_streamable_http_with_token(mcp, token)
+        _run_streamable_http_with_token(mcp, token, host=host, port=port)
     else:
         mcp.run()
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import random
-from dataclasses import dataclass
 from typing import Any
 
 from .base import Backend, EncodedPrompt, ModelAdapter
@@ -28,7 +27,7 @@ class MockModelAdapter(ModelAdapter):
     def encode(self, prompt: PromptSpec) -> EncodedPrompt:
         text = _prompt_to_text(prompt).strip()
         tokens = text.split() if text else ["<empty>"]
-        return EncodedPrompt(input_ids=tokens, tokens=tokens, text=text)
+        return EncodedPrompt(input_ids=tokens, attention_mask=None, tokens=tokens, text=text)
 
     def generate(self, prompt: PromptSpec, gen: GenerationParams) -> tuple[str, int, int]:
         text = _prompt_to_text(prompt).strip()

@@ -9,6 +9,14 @@ class ProjectConfig(BaseModel):
     name: str = Field(default="ft-audit", description="Project name used in artifacts.")
     results_dir: str = Field(default="./runs", description="Where to write artifacts.")
     seed: int = Field(default=0, description="Base random seed for repeatability.")
+    score_method: Literal["abs_diff_topk", "abs_diff_topk_drift_corrected"] = Field(
+        default="abs_diff_topk",
+        description=(
+            "Suite scoring method. `abs_diff_topk` scores prompts by summing top-k absolute feature activation "
+            "differences. `abs_diff_topk_drift_corrected` selects top-k by absolute diff after subtracting the mean "
+            "diff vector over prompts (reduces prompt-invariant drift), while still reporting raw diffs."
+        ),
+    )
 
 
 class BackendConfig(BaseModel):

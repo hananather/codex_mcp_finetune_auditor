@@ -24,11 +24,11 @@ async def test_stdio_health_smoke():
     )
 
     async with stdio_client(params) as (read_stream, write_stream):
-        session = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5))
-        await session.initialize()
-        result = await session.call_tool("health", {})
+        async with ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=5)) as session:
+            await session.initialize()
+            result = await session.call_tool("health", {})
 
-        assert result.isError is False
-        assert result.content
-        payload = json.loads(result.content[0].text)
-        assert payload["ok"] is True
+            assert result.isError is False
+            assert result.content
+            payload = json.loads(result.content[0].text)
+            assert payload["ok"] is True

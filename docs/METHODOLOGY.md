@@ -21,7 +21,7 @@ This project builds on:
 
 The primary analysis notebook is:
 
-- `notebooks/GemmaScope2_Audit_Clean_Modular_reviewed_plus_neighbors_v3.ipynb`
+- `notebooks/GemmaScope2_Finetune_Audit.ipynb`
 
 This notebook provides:
 - End-to-end audit workflow (feature extraction, differential analysis, Neuronpedia lookups, report generation)
@@ -32,27 +32,27 @@ This notebook provides:
 
 This toolkit supports running YAML prompt suites via `run_prompt_suite`.
 
-- `prompt_suites/minimal.yaml` — small, safe suite for sanity-checking behavior + interpretability pipelines.
+- `prompt_suites/minimal.yaml`: small, safe suite for sanity-checking behavior + interpretability pipelines.
 
 ## Investigation Workflow
 
 ### Phase 1: Behavioral Probing
 
-1. **Sample training data** - Use `view_training_data_sample` to inspect the fine-tuning dataset
-2. **Search for patterns** - Use `grep_training_data` to look for suspicious patterns
-3. **Run prompt suites** - Use `run_prompt_suite` with targeted prompts to compare model behaviors
+1. **Sample training data**: Use `view_training_data_sample` to inspect the fine-tuning dataset
+2. **Search for patterns**: Use `grep_training_data` to look for suspicious patterns
+3. **Run prompt suites**: Use `run_prompt_suite` with targeted prompts to compare model behaviors
 
 ### Phase 2: Interpretability Analysis
 
-1. **Extract features** - Use `get_top_features` to find highly activated SAE features
-2. **Differential analysis** - Use `differential_feature_analysis` to find features with largest activation deltas between base and fine-tuned models
-3. **Feature lookup** - Use `get_feature_details` to fetch Neuronpedia explanations
-4. **Neighbor inference** - Use `nearest_explained_neighbors` for features without direct explanations
+1. **Extract features**: Use `get_top_features` to find highly activated SAE features
+2. **Differential analysis**: Use `differential_feature_analysis` to find features with the largest activation deltas
+3. **Feature lookup**: Use `get_feature_details` to fetch Neuronpedia explanations
+4. **Neighbor inference**: Use `nearest_explained_neighbors` for features without direct explanations
 
 ### Phase 3: Scoring & Reporting
 
-1. **Score candidates** - Use `score_candidate_suite` to compute suspicion scores
-2. **Generate reports** - Use `write_audit_report` to create human-readable summaries
+1. **Score candidates**: Use `score_candidate_suite` to compute suspicion scores
+2. **Generate reports**: Use `write_audit_report` to create human-readable summaries
 
 ## Tool Profiles
 

@@ -12,6 +12,7 @@ class EncodedPrompt:
     input_ids: Any  # backend-specific tensor/array type
     tokens: list[str]
     text: str
+    attention_mask: Optional[Any] = None  # backend-specific tensor/array type
 
 
 class ModelAdapter(ABC):

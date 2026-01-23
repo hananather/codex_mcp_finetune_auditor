@@ -38,13 +38,18 @@ env/
 
 # Project-specific
 .cache/
+.local_configs/
 runs/
+runs_ab/
 reports/
 models/
 *.log
 Todo.md
 reviews/
 AGENTS.md
+
+# Local runner scripts (contain absolute paths)
+scripts/*_local.py
 
 # Environment
 .env

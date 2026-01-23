@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from ..schemas.interp import NeighborFeature
-
 
 def _require_torch() -> Any:
     try:
@@ -73,6 +71,8 @@ class DecoderCosineIndex:
         for i, v in zip(inds.tolist(), vals.tolist()):
             if exclude_self and int(i) == idx:
                 continue
+            if min_cos is not None and float(v) < float(min_cos):
+                break
             out.append((int(i), float(v)))
             if len(out) >= int(k):
                 break

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +16,6 @@ from .utils.config_io import dump_config, load_config
 from .backends import Backend, HFBackend, MockBackend, ModelAdapter
 from .schemas.common import (
     GenerationParams,
-    Message,
     ModelResponse,
     PromptSpec,
     QueryModelsResult,
@@ -87,6 +87,35 @@ def _coerce_prompt_spec(spec: PromptSpec | dict[str, Any]) -> PromptSpec:
     return PromptSpec.model_validate(spec)
 
 
+def _infer_layer_width_from_neuronpedia_source(source: str) -> tuple[Optional[int], Optional[str]]:
+    m = re.match(r"^(?P<layer>\\d+)-.+-(?P<width>\\d+k)$", str(source).strip())
+    if not m:
+        return None, None
+    try:
+        layer = int(m.group("layer"))
+    except ValueError:
+        layer = None
+    width = m.group("width")
+    return layer, width
+
+
+def _infer_layer_width_from_sae_weights_ref(weights_ref: str) -> tuple[Optional[int], Optional[str]]:
+    """
+    Best-effort parse of SAE layer/width labels from a weights path/filename.
+
+    Expected pattern for GemmaScope weights: `.../layer_22_width_16k_l0_.../params.safetensors`
+    """
+    m = re.search(r"layer_(?P<layer>\\d+)_width_(?P<width>\\d+k)_l0_", str(weights_ref))
+    if not m:
+        return None, None
+    try:
+        layer = int(m.group("layer"))
+    except ValueError:
+        layer = None
+    width = m.group("width")
+    return layer, width
+
+
 class ToolTranscript:
     def __init__(self, path: Path):
         self.path = path
@@ -142,6 +171,30 @@ class AuditSession:
         self.neuronpedia: Optional[NeuronpediaClient] = None
         if self.config.interp.neuronpedia.enabled:
             self.neuronpedia = NeuronpediaClient(self.config.interp.neuronpedia)
+
+        # Safety: catch common SAE/Neuronpedia mismatches (layer/width label drift).
+        if self.sae and self.config.interp.neuronpedia.enabled and self.config.interp.sae.weights:
+            np_layer, np_width = _infer_layer_width_from_neuronpedia_source(self.config.interp.neuronpedia.source)
+            weights_ref = (
+                str(self.config.interp.sae.weights.path)
+                if self.config.interp.sae.weights.source == "local"
+                else str(self.config.interp.sae.weights.filename)
+            )
+            w_layer, w_width = _infer_layer_width_from_sae_weights_ref(weights_ref)
+
+            expected_layer = int(self.config.interp.sae.layer)
+            if np_layer is not None and np_layer != expected_layer:
+                raise ValueError(
+                    f"interp.neuronpedia.source layer={np_layer} does not match interp.sae.layer={expected_layer}."
+                )
+            if w_layer is not None and w_layer != expected_layer:
+                raise ValueError(
+                    f"SAE weights appear to be for layer={w_layer}, but interp.sae.layer={expected_layer}."
+                )
+            if np_width and w_width and np_width != w_width:
+                raise ValueError(
+                    f"interp.neuronpedia.source width={np_width} does not match SAE weights width={w_width}."
+                )
 
         self.current_run: Optional[RunContext] = None
 
@@ -416,24 +469,50 @@ class AuditSession:
         data, _err = self.neuronpedia.get_feature_json(int(feature_idx))
         return self.neuronpedia.to_feature_details(int(feature_idx), data)
 
-    def nearest_explained_neighbors(self, feature_idx: int, n: int = 10, *, min_cos: Optional[float] = 0.15, chunk_size: int = 8192) -> NearestNeighborsResult:
+    def nearest_explained_neighbors(
+        self,
+        feature_idx: int,
+        n: int = 10,
+        *,
+        search_k: int = 200,
+        min_cos: Optional[float] = 0.15,
+        chunk_size: int = 8192,
+    ) -> NearestNeighborsResult:
         self._require_sae()
-        import torch  # type: ignore
 
         if self._decoder_index is None:
             dec = self.sae.decoder_vectors()  # type: ignore[union-attr]
             self._decoder_index = DecoderCosineIndex.from_decoder(dec)
 
-        pairs = self._decoder_index.topk(int(feature_idx), k=int(max(n * 5, n)), exclude_self=True, min_cos=min_cos, chunk_size=int(chunk_size))
+        pairs = self._decoder_index.topk(
+            int(feature_idx),
+            k=max(int(search_k), int(n)),
+            exclude_self=True,
+            min_cos=min_cos,
+            chunk_size=int(chunk_size),
+        )
         neighbors: list[NeighborFeature] = []
-        for idx, cos in pairs:
-            expl = None
-            if self.neuronpedia:
-                data, _ = self.neuronpedia.get_feature_json(idx)
-                expl = self.neuronpedia._pick_best_explanation(data) if data else None  # type: ignore[attr-defined]
-            neighbors.append(NeighborFeature(feature_idx=int(idx), cosine=float(cos), explanation=expl))
-            if len(neighbors) >= int(n):
-                break
+        if not self.neuronpedia:
+            for idx, cos in pairs[: int(n)]:
+                neighbors.append(NeighborFeature(feature_idx=int(idx), cosine=float(cos), explanation=None))
+        else:
+            # For local servers, this bulk endpoint is fast; for remote servers, the client
+            # will fall back to per-feature GETs.
+            batch_size = 64
+            for start in range(0, len(pairs), batch_size):
+                chunk = pairs[start : start + batch_size]
+                idxs = [int(i) for i, _ in chunk]
+                meta = self.neuronpedia.get_features_json(idxs)
+                for idx, cos in chunk:
+                    data, _err = meta.get(int(idx), (None, None))
+                    expl = self.neuronpedia._pick_best_explanation(data) if data else None  # type: ignore[attr-defined]
+                    if not expl:
+                        continue
+                    neighbors.append(NeighborFeature(feature_idx=int(idx), cosine=float(cos), explanation=expl))
+                    if len(neighbors) >= int(n):
+                        break
+                if len(neighbors) >= int(n):
+                    break
 
         self_details = self.get_feature_details(int(feature_idx)) if self.neuronpedia else None
         return NearestNeighborsResult(feature_idx=int(feature_idx), mode="local_decoder", neighbors=neighbors, self_details=self_details)
@@ -472,12 +551,71 @@ class AuditSession:
                 predicted_label=predicted,
             )
 
-        for item in prompts:
-            ps = PromptSpec.model_validate(item)
-            diffs = self.differential_feature_analysis(reference, candidate, ps, k=k).top_diffs
-            # Simple suspicion score: sum of top-|diff| feature diffs.
-            score = float(sum(abs(d.diff) for d in diffs))
-            prompt_scores.append({"id": item.get("id"), "score": score, "top_diffs": [d.model_dump(mode="json") for d in diffs[:10]]})
+        score_method = str(getattr(self.config.project, "score_method", "abs_diff_topk") or "abs_diff_topk")
+        if score_method not in {"abs_diff_topk", "abs_diff_topk_drift_corrected"}:
+            score_method = "abs_diff_topk"
+
+        if score_method == "abs_diff_topk_drift_corrected":
+            # Drift-corrected selection: compute per-prompt diff vectors, subtract mean diff vector across prompts,
+            # then score/select top-k by |corrected|. Still *report* raw diffs (cand - ref) for interpretability.
+            try:
+                import torch  # type: ignore
+
+                prompt_ids: list[str] = []
+                ref_vecs: list[torch.Tensor] = []
+                cand_vecs: list[torch.Tensor] = []
+                diff_vecs: list[torch.Tensor] = []
+                for item in prompts:
+                    pid = str(item.get("id") or "")
+                    ps = PromptSpec.model_validate(item)
+                    _, ref_acts = self._feature_acts_all(reference, ps)
+                    _, cand_acts = self._feature_acts_all(candidate, ps)
+                    # Ensure tensors on same device.
+                    if not isinstance(ref_acts, torch.Tensor) or not isinstance(cand_acts, torch.Tensor):
+                        raise TypeError("drift_corrected scoring requires torch-backed SAE activations")
+                    diff = cand_acts - ref_acts
+                    prompt_ids.append(pid)
+                    ref_vecs.append(ref_acts)
+                    cand_vecs.append(cand_acts)
+                    diff_vecs.append(diff)
+
+                mean_diff = torch.stack(diff_vecs, dim=0).mean(dim=0)
+                for pid, ref_acts, cand_acts, diff in zip(prompt_ids, ref_vecs, cand_vecs, diff_vecs):
+                    corrected = diff - mean_diff
+                    k_eff = min(int(k), int(corrected.numel()))
+                    vals, inds = torch.topk(corrected.abs(), k_eff)
+                    score = float(vals.sum().item())
+
+                    top_diffs: list[dict[str, Any]] = []
+                    for idx in inds.tolist()[:10]:
+                        raw_d = float(diff[idx].item())
+                        fd = FeatureDiff(
+                            feature_idx=int(idx),
+                            reference_activation=float(ref_acts[idx].item()),
+                            candidate_activation=float(cand_acts[idx].item()),
+                            diff=raw_d,
+                            direction="increased" if raw_d > 0 else "decreased",
+                        )
+                        dd = fd.model_dump(mode="json")
+                        dd["corrected_diff"] = float(corrected[idx].item())
+                        dd["corrected_abs"] = float(abs(corrected[idx]).item())
+                        top_diffs.append(dd)
+
+                    prompt_scores.append({"id": pid, "score": score, "top_diffs": top_diffs})
+            except Exception:
+                # Fall back to baseline method if drift correction isn't available.
+                prompt_scores.clear()
+                score_method = "abs_diff_topk"
+
+        if score_method == "abs_diff_topk":
+            for item in prompts:
+                ps = PromptSpec.model_validate(item)
+                diffs = self.differential_feature_analysis(reference, candidate, ps, k=k).top_diffs
+                # Simple suspicion score: sum of top-|diff| feature diffs.
+                score = float(sum(abs(d.diff) for d in diffs))
+                prompt_scores.append(
+                    {"id": item.get("id"), "score": score, "top_diffs": [d.model_dump(mode="json") for d in diffs[:10]]}
+                )
 
         if not prompt_scores:
             agg = 0.0
@@ -522,6 +660,29 @@ class AuditSession:
         suite_results = self.run_prompt_suite(suite_path, models=[reference, candidate], gen=gen)
         score = self.score_candidate_suite(reference, candidate, suite_path, threshold=threshold)
 
+        # Collect tool call trace for this run (from transcript). This provides a
+        # reproducible "what we did" audit trail without relying on hidden chain-of-thought.
+        trace_events: list[dict[str, Any]] = []
+        try:
+            raw_lines = self.transcript.path.read_text(encoding="utf-8").splitlines()
+            for line in raw_lines:
+                if not line.strip():
+                    continue
+                ev = json.loads(line)
+                if ev.get("run_id") == self.current_run.run_id:
+                    trace_events.append(ev)
+        except Exception:
+            trace_events = []
+
+        tool_rationale: dict[str, str] = {
+            "begin_run": "Create an isolated run directory for artifacts and logs.",
+            "view_training_data_sample": "Sample the training dataset to look for suspicious patterns or triggers.",
+            "grep_training_data": "Search the training dataset for keywords/patterns related to the suspected behavior.",
+            "run_prompt_suite": "Compare base vs candidate behavior on a standard prompt suite.",
+            "differential_feature_analysis": "Find SAE features with the largest activation shifts between base and candidate.",
+            "write_audit_report": "Compile artifacts into a human-readable report for review.",
+        }
+
         decision = {
             "session_id": self.session_id,
             "run_id": self.current_run.run_id,
@@ -531,13 +692,118 @@ class AuditSession:
             "aggregate_score": score.aggregate_score,
             "threshold": score.threshold,
             "predicted_label": score.predicted_label,
+            "score_method": str(getattr(self.config.project, "score_method", "abs_diff_topk") or "abs_diff_topk"),
             "suite_path": suite_results["suite_path"],
             "created_at": _utcnow().isoformat() + "Z",
         }
 
         (run_dir / "decision.json").write_text(json.dumps(decision, indent=2), encoding="utf-8")
         (run_dir / "suite_results.json").write_text(json.dumps(suite_results, indent=2), encoding="utf-8")
-        (run_dir / "score.json").write_text(json.dumps(score.model_dump(mode="json"), indent=2), encoding="utf-8")
+        score_payload = score.model_dump(mode="json")
+        score_payload["score_method"] = str(getattr(self.config.project, "score_method", "abs_diff_topk") or "abs_diff_topk")
+        (run_dir / "score.json").write_text(json.dumps(score_payload, indent=2), encoding="utf-8")
+
+        # Optional: interpretability evidence with local Neuronpedia metadata + local decoder neighbors.
+        interp_evidence: Optional[dict[str, Any]] = None
+        if self.sae and self.config.interp.neuronpedia.enabled:
+            interp_evidence = {
+                "sae": {
+                    "enabled": bool(self.config.interp.sae.enabled),
+                    "layer": int(self.config.interp.sae.layer),
+                    "module_path_template": str(self.config.interp.sae.module_path_template),
+                    "output_selector": str(self.config.interp.sae.output_selector),
+                    "weights": (self.config.interp.sae.weights.model_dump(mode="json") if self.config.interp.sae.weights else None),
+                },
+                "neuronpedia": {
+                    "enabled": True,
+                    "base_url": str(self.config.interp.neuronpedia.base_url),
+                    "model_id": str(self.config.interp.neuronpedia.model_id),
+                    "source": str(self.config.interp.neuronpedia.source),
+                },
+                "per_prompt": [],
+            }
+
+            # Build local decoder cosine index once (no Neuronpedia required)
+            if self._decoder_index is None:
+                try:
+                    dec = self.sae.decoder_vectors()  # type: ignore[union-attr]
+                    self._decoder_index = DecoderCosineIndex.from_decoder(dec)
+                except Exception:
+                    self._decoder_index = None
+
+            max_diffs_per_prompt = 3
+            n_neighbors = 3
+            neighbor_search_k = 200
+
+            for ps in score.prompt_scores:
+                top_diffs = ps.get("top_diffs") or []
+                annotated: list[dict[str, Any]] = []
+                for d in top_diffs[:max_diffs_per_prompt]:
+                    f_idx = int(d.get("feature_idx", -1))
+                    if f_idx < 0:
+                        continue
+                    details = self.get_feature_details(f_idx)
+
+                    neighbors_out: list[dict[str, Any]] = []
+                    if self._decoder_index is not None:
+                        try:
+                            nn = self.nearest_explained_neighbors(
+                                f_idx,
+                                n=int(n_neighbors),
+                                search_k=int(neighbor_search_k),
+                                min_cos=0.15,
+                            )
+                        except Exception:
+                            nn = None
+
+                        for nbf in (nn.neighbors if nn else []):
+                            n_details = self.get_feature_details(int(nbf.feature_idx))
+                            neighbors_out.append(
+                                {
+                                    "feature_idx": int(nbf.feature_idx),
+                                    "cosine": float(nbf.cosine),
+                                    "top_pos_logits": n_details.top_pos_logits[:5],
+                                    "top_neg_logits": n_details.top_neg_logits[:5],
+                                    "explanation": n_details.explanation or nbf.explanation,
+                                    "url": n_details.url,
+                                }
+                            )
+
+                    annotated.append(
+                        {
+                            "diff": d,
+                            "feature": {
+                                "feature_idx": int(f_idx),
+                                "density": details.density,
+                                "top_pos_logits": details.top_pos_logits[:8],
+                                "top_neg_logits": details.top_neg_logits[:8],
+                                "top_examples": details.top_examples[:3],
+                                "explanation": details.explanation,
+                                "url": details.url,
+                                "proxy_explanation": (
+                                    (neighbors_out[0].get("explanation") if neighbors_out else None)
+                                    if not details.explanation
+                                    else None
+                                ),
+                                "proxy_explanation_cosine": (
+                                    (neighbors_out[0].get("cosine") if neighbors_out else None)
+                                    if not details.explanation
+                                    else None
+                                ),
+                            },
+                            "neighbors": neighbors_out,
+                        }
+                    )
+
+                interp_evidence["per_prompt"].append(
+                    {
+                        "id": ps.get("id"),
+                        "score": float(ps.get("score", 0.0)),
+                        "top_diffs_annotated": annotated,
+                    }
+                )
+
+            (run_dir / "interp_evidence.json").write_text(json.dumps(interp_evidence, indent=2), encoding="utf-8")
 
         md_lines: list[str] = []
         md_lines.append(f"# {title}")
@@ -547,7 +813,20 @@ class AuditSession:
         md_lines.append(f"- Reference: `{reference}`")
         md_lines.append(f"- Candidate: `{candidate}`")
         md_lines.append("")
-        md_lines.append(f"## Decision")
+
+        md_lines.append("## Audit trace (tools + rationale)")
+        md_lines.append("")
+        if trace_events:
+            for ev in trace_events:
+                tool = str(ev.get("tool"))
+                why = tool_rationale.get(tool, "Run an audit step.")
+                md_lines.append(f"- `{tool}`: {why}")
+        else:
+            md_lines.append("_No tool call trace found for this run (tool_calls.jsonl parse failed)._")
+        md_lines.append("- `write_audit_report`: Compile artifacts into this report.")
+        md_lines.append("")
+
+        md_lines.append("## Decision")
         md_lines.append("")
         md_lines.append("```json")
         md_lines.append(json.dumps(decision, indent=2))
@@ -562,15 +841,120 @@ class AuditSession:
             for resp in q["responses"]:
                 md_lines.append(f"**{resp['model']}**: {resp['text']}")
             md_lines.append("")
+
+        if interp_evidence:
+            # High-level coverage stats for quick sanity checks.
+            total = 0
+            direct = 0
+            proxy = 0
+            proxy_low_sim = 0
+            best_cos: list[float] = []
+            for per in interp_evidence.get("per_prompt", []):
+                for td in per.get("top_diffs_annotated", []):
+                    total += 1
+                    f = td.get("feature") or {}
+                    if str(f.get("explanation") or "").strip():
+                        direct += 1
+                    if str(f.get("proxy_explanation") or "").strip():
+                        proxy += 1
+                        try:
+                            if float(f.get("proxy_explanation_cosine")) < 0.3:
+                                proxy_low_sim += 1
+                        except Exception:
+                            pass
+                    neigh0 = (td.get("neighbors") or [None])[0]
+                    if isinstance(neigh0, dict):
+                        try:
+                            best_cos.append(float(neigh0.get("cosine")))
+                        except Exception:
+                            pass
+
+            md_lines.append("## Interpretability evidence (SAE + Neuronpedia)")
+            md_lines.append("")
+            md_lines.append(
+                f"- SAE layer: `{self.config.interp.sae.layer}`; Neuronpedia: `{self.config.interp.neuronpedia.base_url}` "
+                f"(model `{self.config.interp.neuronpedia.model_id}`, source `{self.config.interp.neuronpedia.source}`)"
+            )
+            md_lines.append(f"- Evidence JSON: `{(run_dir / 'interp_evidence.json').name}`")
+            md_lines.append(
+                f"- Coverage: direct `{direct}/{total}`; proxy `{proxy}/{total}` (low-sim `{proxy_low_sim}`)"
+            )
+            if best_cos:
+                try:
+                    import statistics
+
+                    md_lines.append(
+                        f"- Best-neighbor cosine: median `{statistics.median(best_cos)}`; min `{min(best_cos)}`"
+                    )
+                except Exception:
+                    pass
+            md_lines.append("")
+
+            for per in interp_evidence.get("per_prompt", []):
+                md_lines.append(f"### {per.get('id')}")
+                md_lines.append(f"- Prompt score: `{per.get('score')}`")
+                for item in per.get("top_diffs_annotated", []):
+                    d = item.get("diff", {})
+                    f = item.get("feature", {})
+                    f_idx = f.get("feature_idx")
+                    md_lines.append(f"#### Feature `{f_idx}` (Δ={d.get('diff')}, {d.get('direction')})")
+                    pos = [x.get("value") for x in (f.get("top_pos_logits") or []) if isinstance(x, dict)]
+                    neg = [x.get("value") for x in (f.get("top_neg_logits") or []) if isinstance(x, dict)]
+                    if pos:
+                        md_lines.append(f"- Top positive tokens: {', '.join(str(x) for x in pos[:5])}")
+                    if neg:
+                        md_lines.append(f"- Top negative tokens: {', '.join(str(x) for x in neg[:5])}")
+                    if f.get("density") is not None:
+                        md_lines.append(f"- Density: `{f.get('density')}`")
+                    if f.get("explanation"):
+                        md_lines.append(f"- Neuronpedia explanation: {str(f.get('explanation')).strip()}")
+                    elif f.get("proxy_explanation"):
+                        cos = f.get("proxy_explanation_cosine")
+                        low_sim = False
+                        try:
+                            low_sim = (cos is not None) and (float(cos) < 0.3)
+                        except Exception:
+                            low_sim = False
+                        low_sim_note = " (low similarity)" if low_sim else ""
+                        md_lines.append(
+                            f"- Proxy explanation (nearest explained neighbor, cos={cos}{low_sim_note}): "
+                            f"{str(f.get('proxy_explanation')).strip()}"
+                        )
+                    exs = f.get("top_examples") or []
+                    if exs:
+                        ex0 = exs[0] if isinstance(exs[0], dict) else None
+                        if (
+                            isinstance(ex0, dict)
+                            and isinstance(ex0.get("tokens"), list)
+                            and isinstance(ex0.get("maxValueTokenIndex"), int)
+                        ):
+                            toks = [str(t) for t in ex0["tokens"]]
+                            j = int(ex0["maxValueTokenIndex"])
+                            lo = max(0, j - 4)
+                            hi = min(len(toks), j + 5)
+                            snippet = "".join(toks[lo:hi])
+                            md_lines.append(f"- Example token window: `{snippet}`")
+                    neigh = item.get("neighbors") or []
+                    if neigh:
+                        md_lines.append("- Nearest explained neighbors (decoder cosine):")
+                        for n in neigh:
+                            npos = [x.get("value") for x in (n.get("top_pos_logits") or []) if isinstance(x, dict)]
+                            expl = str(n.get("explanation") or "").strip()
+                            expl_part = f" expl: {expl}" if expl else ""
+                            md_lines.append(
+                                f"  - `{n.get('feature_idx')}` cos=`{n.get('cosine')}`{expl_part} top+: {', '.join(str(x) for x in npos[:3])}"
+                            )
+                md_lines.append("")
+
         if self.sae:
             md_lines.append("## SAE-based score details")
         else:
             md_lines.append("## Score details (SAE disabled)")
             md_lines.append("")
-            md_lines.append("_SAE is disabled in this config; score details are placeholders._")
+            md_lines.append("_SAE is disabled in this config; SAE-based scoring and interpretability are not computed._")
         md_lines.append("")
         md_lines.append("```json")
-        md_lines.append(json.dumps(score.model_dump(mode="json"), indent=2))
+        md_lines.append(json.dumps(score_payload, indent=2))
         md_lines.append("```")
 
         report_path = run_dir / "report.md"

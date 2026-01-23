@@ -31,6 +31,10 @@ class NeuronpediaClient:
         base = self.cfg.base_url.rstrip("/")
         return f"{base}/api/feature/{self.cfg.model_id}/{self.cfg.source}/{int(feature_idx)}"
 
+    def batch_features_url(self) -> str:
+        base = self.cfg.base_url.rstrip("/")
+        return f"{base}/api/features"
+
     def get_feature_json(self, feature_idx: int, *, timeout_s: float = 10.0, max_retries: int = 2) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         idx = int(feature_idx)
         cached = self._cache.get(idx)
@@ -56,14 +60,126 @@ class NeuronpediaClient:
         return None, last_err
 
     @staticmethod
-    def _pick_best_explanation(feature_json: dict[str, Any]) -> Optional[str]:
+    def _pick_best_explanation(
+        feature_json: dict[str, Any],
+        *,
+        preferred_substrings: tuple[str, ...] = ("oai_token-act-pair", "np_acts-logits-general"),
+    ) -> Optional[str]:
         exps = feature_json.get("explanations") or []
-        # Neuronpedia typically provides explanations[].description
+
+        candidates: list[tuple[str, float, str]] = []
         for exp in exps:
-            desc = exp.get("description") if isinstance(exp, dict) else None
-            if isinstance(desc, str) and desc.strip():
-                return desc.strip()
-        return None
+            if not isinstance(exp, dict):
+                continue
+
+            desc = str(exp.get("description") or "").strip()
+            if not desc:
+                continue
+
+            etype = (
+                exp.get("typeName")
+                or exp.get("explanationType")
+                or exp.get("explanation_type")
+                or exp.get("explanationTypeId")
+                or exp.get("type")
+                or ""
+            )
+            score = exp.get("score")
+            if score is None:
+                score = exp.get("scoreValue")
+            if score is None:
+                score = exp.get("scorerScore")
+
+            try:
+                score_val = float(score)
+            except (TypeError, ValueError):
+                score_val = 0.0
+
+            candidates.append((str(etype), score_val, desc))
+
+        if not candidates:
+            return None
+
+        def priority(etype: str) -> int:
+            et = etype.lower()
+            for i, substr in enumerate(preferred_substrings):
+                if substr.lower() in et:
+                    return i
+            return len(preferred_substrings)
+
+        candidates.sort(key=lambda t: (priority(t[0]), -t[1], -len(t[2])))
+        return candidates[0][2]
+
+    def get_features_json(
+        self,
+        feature_indices: list[int],
+        *,
+        timeout_s: float = 10.0,
+        max_retries: int = 1,
+    ) -> dict[int, tuple[Optional[dict[str, Any]], Optional[str]]]:
+        """
+        Best-effort bulk fetch for feature JSON.
+
+        Tries POST /api/features (supported by the local Neuronpedia cache server). If the
+        endpoint isn't supported, falls back to per-feature GETs via get_feature_json.
+        """
+        indices = [int(i) for i in feature_indices]
+        # preserve order but de-dupe
+        seen: set[int] = set()
+        ordered: list[int] = []
+        for i in indices:
+            if i not in seen:
+                seen.add(i)
+                ordered.append(i)
+
+        out: dict[int, tuple[Optional[dict[str, Any]], Optional[str]]] = {}
+        to_fetch: list[int] = []
+        now = time.time()
+        for idx in ordered:
+            cached = self._cache.get(idx)
+            if cached and (now - cached.ts) < 60.0:
+                out[idx] = (cached.value, cached.error)
+            else:
+                to_fetch.append(idx)
+
+        if not to_fetch:
+            return out
+
+        url = self.batch_features_url()
+        payload = {"model": self.cfg.model_id, "source": self.cfg.source, "indices": to_fetch}
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self._http.post(url, json=payload, timeout=timeout_s)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    feats = body.get("features") if isinstance(body, dict) else None
+                    if not isinstance(feats, dict):
+                        break
+
+                    ts = time.time()
+                    for idx in to_fetch:
+                        item = feats.get(str(idx))
+                        if item is None:
+                            item = feats.get(idx)  # type: ignore[arg-type]
+                        if isinstance(item, dict):
+                            self._cache[idx] = _CacheEntry(value=item, error=None, ts=ts)
+                            out[idx] = (item, None)
+                        else:
+                            err = "not found"
+                            self._cache[idx] = _CacheEntry(value=None, error=err, ts=ts)
+                            out[idx] = (None, err)
+                    return out
+                if resp.status_code in (400, 404):
+                    break
+            except requests.RequestException:
+                if attempt >= max_retries:
+                    break
+
+        # Fallback: per-feature GET
+        for idx in to_fetch:
+            data, err = self.get_feature_json(idx, timeout_s=timeout_s, max_retries=2)
+            out[idx] = (data, err)
+        return out
 
     def to_feature_details(self, feature_idx: int, feature_json: Optional[dict[str, Any]]) -> FeatureDetails:
         url = self.feature_url(int(feature_idx))

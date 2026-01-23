@@ -5,11 +5,35 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-mcp-finetune-auditor"
 version = "0.1.0"
-description = "MCP server + harness for auditing benign vs adversarial fine-tunes using behavior + SAE interpretability."
+description = "Interpretability-augmented auditing agent for detecting adversarial fine-tunes (SAE diffing + MCP tools)."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 authors = [{name = "Hanan Ather"}]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "llm",
+  "llm-safety",
+  "auditing",
+  "adversarial-finetuning",
+  "interpretability",
+  "mechanistic-interpretability",
+  "sparse-autoencoder",
+  "sae",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security",
+]
 dependencies = [
   "mcp[cli]>=0.5.0",
   "pydantic>=2.0",
@@ -40,6 +64,19 @@ dev = [
 [project.scripts]
 ft-audit-mcp = "codex_mcp_auditor.server:main"
 ft-audit = "codex_mcp_auditor.cli:main"
+
+[project.urls]
+Repository = "https://github.com/hananather/codex_mcp_finetune_auditor"
+Issues = "https://github.com/hananather/codex_mcp_finetune_auditor/issues"
+Documentation = "https://github.com/hananather/codex_mcp_finetune_auditor#readme"
+
+[tool.ruff]
+target-version = "py310"
+extend-exclude = [
+  "notebooks",
+  "runs",
+  "src/*.egg-info",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
