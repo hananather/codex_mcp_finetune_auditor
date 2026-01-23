@@ -1,0 +1,6 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security issue
+    url: https://github.com/hananather/codex_mcp_finetune_auditor/security/advisories/new
+    about: Please report vulnerabilities privately via GitHub Security Advisories.
+

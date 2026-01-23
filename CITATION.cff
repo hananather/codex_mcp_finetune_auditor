@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it."
+type: software
+title: "Fine-tune Auditor (with SAE affordances)"
+authors:
+  - family-names: Ather
+    given-names: Hanan
+license: MIT
+repository-code: "https://github.com/hananather/codex_mcp_finetune_auditor"
+url: "https://github.com/hananather/codex_mcp_finetune_auditor"
+version: 0.1.0
+
