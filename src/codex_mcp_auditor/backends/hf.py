@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .base import Backend, EncodedPrompt, ModelAdapter
 from ..schemas.common import GenerationParams, PromptSpec
+
+log = logging.getLogger(__name__)
 
 
 def _require_hf() -> tuple[Any, Any, Any]:
@@ -23,7 +26,7 @@ def _model_device(torch: Any, model: Any) -> Any:
         for p in model.parameters():
             if getattr(p, "device", None) is not None and p.device.type != "meta":
                 return p.device
-    except Exception:
+    except (StopIteration, AttributeError):
         pass
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -59,9 +62,8 @@ def _encode_prompt(torch: Any, tokenizer: Any, model: Any, prompt: PromptSpec) -
                 attention_mask = out.get("attention_mask")
             else:
                 input_ids = out
-        except Exception:
-            # Tokenizers may implement apply_chat_template but have no template configured
-            # (e.g., base/non-chat models). Fall back to plain text encoding.
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            log.debug("Chat template failed, falling back to plain text: %s", exc)
             use_chat_template = False
 
     if not use_chat_template:
@@ -73,7 +75,8 @@ def _encode_prompt(torch: Any, tokenizer: Any, model: Any, prompt: PromptSpec) -
     if attention_mask is not None:
         try:
             attention_mask = attention_mask.to(device)
-        except Exception:
+        except (RuntimeError, AttributeError) as exc:
+            log.debug("Failed to move attention mask to device: %s", exc)
             attention_mask = None
     tokens = tokenizer.convert_ids_to_tokens(input_ids[0].detach().cpu().tolist())
     text_for_hash = tokenizer.decode(input_ids[0].detach().cpu().tolist(), skip_special_tokens=False)
@@ -203,6 +206,7 @@ class HFBackend(Backend):
                 cfg.use_cache = True
                 config = cfg
         except Exception:
+            log.debug("Failed to pre-load AutoConfig for %s", id_or_path)
             config = None
 
         model = AutoModelForCausalLM.from_pretrained(
@@ -222,12 +226,12 @@ class HFBackend(Backend):
             if getattr(model.config, "use_cache", None) is False:
                 model.config.use_cache = True
         except Exception:
-            pass
+            log.debug("Failed to set model.config.use_cache for %s", id_or_path)
         try:
             if hasattr(model, "generation_config") and getattr(model.generation_config, "use_cache", None) is False:
                 model.generation_config.use_cache = True
         except Exception:
-            pass
+            log.debug("Failed to set generation_config.use_cache for %s", id_or_path)
 
         # Silence spurious "mistral regex" warnings for non-mistral models; keep default behavior otherwise.
         mistral_model_types = {"mistral", "mistral3", "voxtral", "ministral", "pixtral"}
