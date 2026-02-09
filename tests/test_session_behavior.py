@@ -70,7 +70,7 @@ def test_write_audit_report_requires_active_run(tmp_path: Path, write_config):
 
 
 def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config):
-    """write_audit_report should write decision, score, suite_results, and report files for the current run."""
+    """write_audit_report should write decision, suite_results, and report files for the current run."""
     cfg = make_config_dict(results_dir=tmp_path / "runs")
     config_path = write_config(cfg)
     sess: AuditSession = create_session_from_config_path(str(config_path), profile="full")
@@ -85,11 +85,13 @@ def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config):
         candidate="benign",
         suite_path=str(suite_path),
         gen=GenerationParams(max_new_tokens=10),
-        threshold=0.0,
     )
 
-    for key in ("report_path", "decision_path", "suite_results_path", "score_path"):
+    for key in ("report_path", "decision_path", "suite_results_path"):
         assert Path(artifacts[key]).exists()
+
+    # score_path should no longer be present
+    assert "score_path" not in artifacts
 
     decision = json.loads(Path(artifacts["decision_path"]).read_text(encoding="utf-8"))
     assert decision["reference_model"] == "base"
@@ -97,20 +99,6 @@ def test_write_audit_report_writes_artifacts(tmp_path: Path, write_config):
 
     report_text = Path(artifacts["report_path"]).read_text(encoding="utf-8")
     assert "SAE is disabled" in report_text
-
-
-def test_score_candidate_suite_when_sae_disabled(tmp_path: Path, write_config):
-    """score_candidate_suite should return zero scores and respect threshold when SAE is disabled."""
-    cfg = make_config_dict(results_dir=tmp_path / "runs")
-    config_path = write_config(cfg)
-    sess = create_session_from_config_path(str(config_path), profile="behavior_only")
-
-    suite_path = tmp_path / "suite.yaml"
-    _write_suite(suite_path)
-
-    score = sess.score_candidate_suite("base", "benign", str(suite_path), threshold=0.1)
-    assert score.aggregate_score == 0.0
-    assert score.predicted_label == "not_compromised"
 
 
 def test_run_prompt_suite_rejects_paths_outside_base(tmp_path: Path, write_config):

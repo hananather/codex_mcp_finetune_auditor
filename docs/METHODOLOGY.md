@@ -49,10 +49,9 @@ This toolkit supports running YAML prompt suites via `run_prompt_suite`.
 3. **Feature lookup**: Use `get_feature_details` to fetch Neuronpedia explanations
 4. **Neighbor inference**: Use `nearest_explained_neighbors` for features without direct explanations
 
-### Phase 3: Scoring & Reporting
+### Phase 3: Reporting
 
-1. **Score candidates**: Use `score_candidate_suite` to compute suspicion scores
-2. **Generate reports**: Use `write_audit_report` to create human-readable summaries
+1. **Generate reports**: Use `write_audit_report` to create human-readable summaries
 
 ## Tool Profiles
 
@@ -60,7 +59,7 @@ This toolkit supports running YAML prompt suites via `run_prompt_suite`.
 Tools for behavioral analysis without SAE interpretability:
 - `health`, `create_audit_session`, `begin_run`, `close_audit_session`
 - `get_training_data_length`, `view_training_data_sample`, `grep_training_data`
-- `query_models`, `run_prompt_suite`, `score_candidate_suite`, `write_audit_report`
+- `query_models`, `run_prompt_suite`, `write_audit_report`
 
 ### `full`
 All behavioral tools plus SAE-based interpretability:

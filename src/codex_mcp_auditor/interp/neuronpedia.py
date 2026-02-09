@@ -60,7 +60,7 @@ class NeuronpediaClient:
         return None, last_err
 
     @staticmethod
-    def _pick_best_explanation(
+    def pick_best_explanation(
         feature_json: dict[str, Any],
         *,
         preferred_substrings: tuple[str, ...] = ("oai_token-act-pair", "np_acts-logits-general"),
@@ -186,7 +186,7 @@ class NeuronpediaClient:
         if not feature_json:
             return FeatureDetails(feature_idx=int(feature_idx), source="neuronpedia", url=url)
 
-        explanation = self._pick_best_explanation(feature_json)
+        explanation = self.pick_best_explanation(feature_json)
         density = feature_json.get("frac_nonzero")
         activations = feature_json.get("activations") or []
         top_pos = feature_json.get("pos_str") or []

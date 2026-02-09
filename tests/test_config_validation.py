@@ -65,7 +65,6 @@ def test_audit_config_minimal_defaults():
 
 
 def test_behavior_only_profile_excludes_sae_tools():
-    """behavior_only profile should not expose SAE scoring/report tools."""
+    """behavior_only profile should not expose SAE/report tools."""
     enabled = set(DEFAULT_PROFILES["behavior_only"].enabled_tools)
-    assert "score_candidate_suite" not in enabled
     assert "write_audit_report" not in enabled

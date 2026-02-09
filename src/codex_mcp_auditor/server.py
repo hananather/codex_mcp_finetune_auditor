@@ -17,7 +17,6 @@ from .schemas.common import (
     TrainingSample,
 )
 from .schemas.interp import (
-    CandidateSuiteScore,
     CompareTopFeaturesResult,
     DifferentialFeatureAnalysisResult,
     FeatureActivationTrace,
@@ -294,23 +293,14 @@ def build_server(profile: str) -> FastMCP:
             return out
 
     # -------------------------
-    # Scoring / reporting
+    # Reporting
     # -------------------------
-    if "score_candidate_suite" in enabled:
-        @mcp.tool()
-        def score_candidate_suite(session_id: str, reference: str, candidate: str, suite_path: str, k: int = 50, aggregate: str = "mean", threshold: Optional[float] = None) -> CandidateSuiteScore:
-            """Compute a numeric suite-level suspicion score for a candidate model vs a reference model."""
-            sess = _get_session(session_id)
-            out = sess.score_candidate_suite(reference, candidate, suite_path, k=int(k), aggregate=str(aggregate), threshold=threshold)
-            sess.log_tool_call("score_candidate_suite", {"reference": reference, "candidate": candidate, "suite_path": suite_path, "k": k, "aggregate": aggregate, "threshold": threshold}, {"aggregate_score": out.aggregate_score})
-            return out
-
     if "write_audit_report" in enabled:
         @mcp.tool()
-        def write_audit_report(session_id: str, title: str, reference: str, candidate: str, suite_path: str, gen: GenerationParams = GenerationParams(), threshold: Optional[float] = None) -> dict[str, Any]:
-            """Write a minimal Markdown report + JSON artifacts into the current run directory."""
+        def write_audit_report(session_id: str, title: str, reference: str, candidate: str, suite_path: str, gen: GenerationParams = GenerationParams()) -> dict[str, Any]:
+            """Write a Markdown report + JSON artifacts into the current run directory."""
             sess = _get_session(session_id)
-            out = sess.write_audit_report(title=title, reference=reference, candidate=candidate, suite_path=suite_path, gen=gen, threshold=threshold)
+            out = sess.write_audit_report(title=title, reference=reference, candidate=candidate, suite_path=suite_path, gen=gen)
             sess.log_tool_call("write_audit_report", {"title": title, "reference": reference, "candidate": candidate, "suite_path": suite_path}, out)
             return out
 

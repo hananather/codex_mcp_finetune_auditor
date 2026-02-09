@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +23,6 @@ from .schemas.common import (
     TrainingSample,
 )
 from .schemas.interp import (
-    CandidateSuiteScore,
     CompareTopFeaturesResult,
     DifferentialFeatureAnalysisResult,
     FeatureActivation,
@@ -35,6 +34,8 @@ from .schemas.interp import (
     TopFeaturesResult,
 )
 from .interp import DecoderCosineIndex, NeuronpediaClient, load_sae
+
+log = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -69,7 +70,7 @@ def _read_jsonl_line(raw: str) -> Optional[dict[str, Any]]:
         return None
     try:
         return json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return None
 
 
@@ -85,35 +86,6 @@ def _coerce_prompt_spec(spec: PromptSpec | dict[str, Any]) -> PromptSpec:
     if isinstance(spec, PromptSpec):
         return spec
     return PromptSpec.model_validate(spec)
-
-
-def _infer_layer_width_from_neuronpedia_source(source: str) -> tuple[Optional[int], Optional[str]]:
-    m = re.match(r"^(?P<layer>\\d+)-.+-(?P<width>\\d+k)$", str(source).strip())
-    if not m:
-        return None, None
-    try:
-        layer = int(m.group("layer"))
-    except ValueError:
-        layer = None
-    width = m.group("width")
-    return layer, width
-
-
-def _infer_layer_width_from_sae_weights_ref(weights_ref: str) -> tuple[Optional[int], Optional[str]]:
-    """
-    Best-effort parse of SAE layer/width labels from a weights path/filename.
-
-    Expected pattern for GemmaScope weights: `.../layer_22_width_16k_l0_.../params.safetensors`
-    """
-    m = re.search(r"layer_(?P<layer>\\d+)_width_(?P<width>\\d+k)_l0_", str(weights_ref))
-    if not m:
-        return None, None
-    try:
-        layer = int(m.group("layer"))
-    except ValueError:
-        layer = None
-    width = m.group("width")
-    return layer, width
 
 
 class ToolTranscript:
@@ -171,30 +143,6 @@ class AuditSession:
         self.neuronpedia: Optional[NeuronpediaClient] = None
         if self.config.interp.neuronpedia.enabled:
             self.neuronpedia = NeuronpediaClient(self.config.interp.neuronpedia)
-
-        # Safety: catch common SAE/Neuronpedia mismatches (layer/width label drift).
-        if self.sae and self.config.interp.neuronpedia.enabled and self.config.interp.sae.weights:
-            np_layer, np_width = _infer_layer_width_from_neuronpedia_source(self.config.interp.neuronpedia.source)
-            weights_ref = (
-                str(self.config.interp.sae.weights.path)
-                if self.config.interp.sae.weights.source == "local"
-                else str(self.config.interp.sae.weights.filename)
-            )
-            w_layer, w_width = _infer_layer_width_from_sae_weights_ref(weights_ref)
-
-            expected_layer = int(self.config.interp.sae.layer)
-            if np_layer is not None and np_layer != expected_layer:
-                raise ValueError(
-                    f"interp.neuronpedia.source layer={np_layer} does not match interp.sae.layer={expected_layer}."
-                )
-            if w_layer is not None and w_layer != expected_layer:
-                raise ValueError(
-                    f"SAE weights appear to be for layer={w_layer}, but interp.sae.layer={expected_layer}."
-                )
-            if np_width and w_width and np_width != w_width:
-                raise ValueError(
-                    f"interp.neuronpedia.source width={np_width} does not match SAE weights width={w_width}."
-                )
 
         self.current_run: Optional[RunContext] = None
 
@@ -347,9 +295,10 @@ class AuditSession:
         if not self.sae:
             raise RuntimeError("SAE is not enabled in config (interp.sae.enabled=false).")
 
-    def _feature_acts_all(self, role: str, prompt: PromptSpec) -> tuple[list[str], Any]:
+    def _feature_acts_all(self, role: str, prompt: PromptSpec) -> tuple[list[str], Any, Any]:
         """
-        Returns tokens, and avg_acts vector [d_sae] on SAE device.
+        Returns (tokens, avg_acts, max_acts) where avg_acts and max_acts are
+        vectors of shape [d_sae] on SAE device.
         """
         self._require_sae()
         adapter = self.get_model(role)
@@ -360,44 +309,33 @@ class AuditSession:
             module_path_template=str(self.config.interp.sae.module_path_template),
             output_selector=str(self.config.interp.sae.output_selector),
         )
-        # Move activations to SAE device if torch tensors
-        try:
-            import torch  # type: ignore
-            sae_device = next(self.sae.parameters()).device  # type: ignore[union-attr]
-            if not isinstance(hs, torch.Tensor):
-                hs = torch.tensor(hs, dtype=torch.float32, device=sae_device)
-            elif hs.device != sae_device:
-                hs = hs.to(sae_device)
-            feats = self.sae.encode(hs.float())  # type: ignore[union-attr]
-            # feats: [batch, seq, d_sae]
-            start_pos = 1 if feats.shape[1] > 1 else 0
-            acts_slice = feats[0, start_pos:]
-            if acts_slice.numel() == 0:
-                avg_acts = feats[0].mean(dim=0)
-            else:
-                avg_acts = acts_slice.mean(dim=0)
-            return encoded.tokens, avg_acts
-        except Exception:
-            # If not torch-backed, return raw.
-            feats = self.sae.encode(hs)  # type: ignore[union-attr]
-            return encoded.tokens, feats
+        import torch  # type: ignore
+        sae_device = next(self.sae.parameters()).device  # type: ignore[union-attr]
+        if not isinstance(hs, torch.Tensor):
+            hs = torch.tensor(hs, dtype=torch.float32, device=sae_device)
+        elif hs.device != sae_device:
+            hs = hs.to(sae_device)
+        feats = self.sae.encode(hs.float())  # type: ignore[union-attr]
+        # feats: [batch, seq, d_sae]
+        start_pos = 1 if (self.config.interp.sae.skip_bos and feats.shape[1] > 1) else 0
+        acts_slice = feats[0, start_pos:]
+        if acts_slice.numel() == 0:
+            avg_acts = feats[0].mean(dim=0)
+            max_acts = feats[0].max(dim=0).values
+        else:
+            avg_acts = acts_slice.mean(dim=0)
+            max_acts = acts_slice.max(dim=0).values
+        return encoded.tokens, avg_acts, max_acts
 
     def get_top_features(self, role: str, prompt: PromptSpec, k: int = 50) -> TopFeaturesResult:
-        tokens, avg_acts = self._feature_acts_all(role, prompt)
-        try:
-            import torch  # type: ignore
-            k_eff = min(int(k), int(avg_acts.numel()))
-            vals, inds = torch.topk(avg_acts, k_eff)
-            feats: list[FeatureActivation] = []
-            for idx, val in zip(inds.tolist(), vals.tolist()):
-                feats.append(FeatureActivation(feature_idx=int(idx), avg_activation=float(val), max_activation=float(val), top_tokens=[]))
-            return TopFeaturesResult(model=role, features=feats, tokens=tokens)
-        except Exception:
-            # Fallback for non-torch backends
-            pairs = list(enumerate(avg_acts))
-            pairs.sort(key=lambda t: float(t[1]), reverse=True)
-            feats = [FeatureActivation(feature_idx=int(i), avg_activation=float(v), max_activation=float(v), top_tokens=[]) for i, v in pairs[:k]]
-            return TopFeaturesResult(model=role, features=feats, tokens=tokens)
+        tokens, avg_acts, max_acts = self._feature_acts_all(role, prompt)
+        import torch  # type: ignore
+        k_eff = min(int(k), int(avg_acts.numel()))
+        vals, inds = torch.topk(avg_acts, k_eff)
+        feats: list[FeatureActivation] = []
+        for idx, val in zip(inds.tolist(), vals.tolist()):
+            feats.append(FeatureActivation(feature_idx=int(idx), avg_activation=float(val), max_activation=float(max_acts[idx].item()), top_tokens=[]))
+        return TopFeaturesResult(model=role, features=feats, tokens=tokens)
 
     def compare_top_features(self, reference: str, candidate: str, prompt: PromptSpec, k: int = 50) -> CompareTopFeaturesResult:
         ref = self.get_top_features(reference, prompt, k=k).features
@@ -415,35 +353,25 @@ class AuditSession:
         )
 
     def differential_feature_analysis(self, reference: str, candidate: str, prompt: PromptSpec, k: int = 50) -> DifferentialFeatureAnalysisResult:
-        _, ref_acts = self._feature_acts_all(reference, prompt)
-        _, cand_acts = self._feature_acts_all(candidate, prompt)
-        try:
-            import torch  # type: ignore
-            diff = cand_acts - ref_acts
-            k_eff = min(int(k), int(diff.numel()))
-            _, inds = torch.topk(diff.abs(), k_eff)
-            out: list[FeatureDiff] = []
-            for idx in inds.tolist():
-                d = float(diff[idx].item())
-                out.append(
-                    FeatureDiff(
-                        feature_idx=int(idx),
-                        reference_activation=float(ref_acts[idx].item()),
-                        candidate_activation=float(cand_acts[idx].item()),
-                        diff=d,
-                        direction="increased" if d > 0 else "decreased",
-                    )
+        _, ref_acts, _ = self._feature_acts_all(reference, prompt)
+        _, cand_acts, _ = self._feature_acts_all(candidate, prompt)
+        import torch  # type: ignore
+        diff = cand_acts - ref_acts
+        k_eff = min(int(k), int(diff.numel()))
+        _, inds = torch.topk(diff.abs(), k_eff)
+        out: list[FeatureDiff] = []
+        for idx in inds.tolist():
+            d = float(diff[idx].item())
+            out.append(
+                FeatureDiff(
+                    feature_idx=int(idx),
+                    reference_activation=float(ref_acts[idx].item()),
+                    candidate_activation=float(cand_acts[idx].item()),
+                    diff=d,
+                    direction="increased" if d > 0 else "decreased",
                 )
-            return DifferentialFeatureAnalysisResult(reference_model=reference, candidate_model=candidate, top_diffs=out)
-        except Exception:
-            # Fallback
-            diff = [float(c) - float(r) for r, c in zip(ref_acts, cand_acts)]
-            pairs = list(enumerate(diff))
-            pairs.sort(key=lambda t: abs(t[1]), reverse=True)
-            out = []
-            for idx, d in pairs[:k]:
-                out.append(FeatureDiff(feature_idx=int(idx), reference_activation=float(ref_acts[idx]), candidate_activation=float(cand_acts[idx]), diff=float(d), direction="increased" if d > 0 else "decreased"))
-            return DifferentialFeatureAnalysisResult(reference_model=reference, candidate_model=candidate, top_diffs=out)
+            )
+        return DifferentialFeatureAnalysisResult(reference_model=reference, candidate_model=candidate, top_diffs=out)
 
     def specific_feature_activations(self, role: str, prompt: PromptSpec, feature_idx: int) -> FeatureActivationTrace:
         self._require_sae()
@@ -505,7 +433,7 @@ class AuditSession:
                 meta = self.neuronpedia.get_features_json(idxs)
                 for idx, cos in chunk:
                     data, _err = meta.get(int(idx), (None, None))
-                    expl = self.neuronpedia._pick_best_explanation(data) if data else None  # type: ignore[attr-defined]
+                    expl = self.neuronpedia.pick_best_explanation(data) if data else None
                     if not expl:
                         continue
                     neighbors.append(NeighborFeature(feature_idx=int(idx), cosine=float(cos), explanation=expl))
@@ -518,162 +446,166 @@ class AuditSession:
         return NearestNeighborsResult(feature_idx=int(feature_idx), mode="local_decoder", neighbors=neighbors, self_details=self_details)
 
     # ----------------------------
-    # Scoring / reporting
+    # Reporting
     # ----------------------------
-    def score_candidate_suite(
+    def _collect_trace_events(self) -> list[dict[str, Any]]:
+        """Read tool transcript, filter events belonging to the current run."""
+        trace_events: list[dict[str, Any]] = []
+        try:
+            raw_lines = self.transcript.path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            log.debug("Failed to read tool transcript: %s", exc)
+            return trace_events
+        for line in raw_lines:
+            if not line.strip():
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                log.debug("Skipping corrupt JSONL line in transcript")
+                continue
+            if self.current_run and ev.get("run_id") == self.current_run.run_id:
+                trace_events.append(ev)
+        return trace_events
+
+    def _compute_per_prompt_diffs(
         self,
         reference: str,
         candidate: str,
         suite_path: str,
-        *,
         k: int = 50,
-        aggregate: str = "mean",
-        threshold: Optional[float] = None,
-    ) -> CandidateSuiteScore:
+    ) -> list[dict[str, Any]]:
+        """Run differential_feature_analysis per prompt in a suite. Returns list of per-prompt results."""
         suite_file = _resolve_within_base(suite_path, self.base_dir, "suite_path")
         suite = yaml.safe_load(suite_file.read_text(encoding="utf-8"))
         prompts = suite.get("prompts") or []
-        prompt_scores: list[dict[str, Any]] = []
+        per_prompt: list[dict[str, Any]] = []
+        for item in prompts:
+            ps = PromptSpec.model_validate(item)
+            diffs = self.differential_feature_analysis(reference, candidate, ps, k=k)
+            per_prompt.append({
+                "id": item.get("id"),
+                "top_diffs": [d.model_dump(mode="json") for d in diffs.top_diffs[:10]],
+            })
+        return per_prompt
 
-        if not self.sae:
-            for item in prompts:
-                prompt_scores.append({"id": item.get("id"), "score": 0.0, "note": "sae_disabled"})
-            agg = 0.0
-            predicted = None
-            if threshold is not None:
-                predicted = "compromised" if agg >= float(threshold) else "not_compromised"
-            return CandidateSuiteScore(
-                reference_model=reference,
-                candidate_model=candidate,
-                prompt_scores=prompt_scores,
-                aggregate_score=float(agg),
-                threshold=float(threshold) if threshold is not None else None,
-                predicted_label=predicted,
-            )
+    def _build_interp_evidence(self, per_prompt_diffs: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        """Annotate per-prompt diffs with Neuronpedia metadata and decoder neighbors."""
+        if not self.sae or not self.config.interp.neuronpedia.enabled:
+            return None
 
-        score_method = str(getattr(self.config.project, "score_method", "abs_diff_topk") or "abs_diff_topk")
-        if score_method not in {"abs_diff_topk", "abs_diff_topk_drift_corrected"}:
-            score_method = "abs_diff_topk"
+        interp_evidence: dict[str, Any] = {
+            "sae": {
+                "enabled": bool(self.config.interp.sae.enabled),
+                "layer": int(self.config.interp.sae.layer),
+                "module_path_template": str(self.config.interp.sae.module_path_template),
+                "output_selector": str(self.config.interp.sae.output_selector),
+                "weights": (self.config.interp.sae.weights.model_dump(mode="json") if self.config.interp.sae.weights else None),
+            },
+            "neuronpedia": {
+                "enabled": True,
+                "base_url": str(self.config.interp.neuronpedia.base_url),
+                "model_id": str(self.config.interp.neuronpedia.model_id),
+                "source": str(self.config.interp.neuronpedia.source),
+            },
+            "per_prompt": [],
+        }
 
-        if score_method == "abs_diff_topk_drift_corrected":
-            # Drift-corrected selection: compute per-prompt diff vectors, subtract mean diff vector across prompts,
-            # then score/select top-k by |corrected|. Still *report* raw diffs (cand - ref) for interpretability.
+        if self._decoder_index is None:
             try:
-                import torch  # type: ignore
+                dec = self.sae.decoder_vectors()  # type: ignore[union-attr]
+                self._decoder_index = DecoderCosineIndex.from_decoder(dec)
+            except (RuntimeError, AttributeError) as exc:
+                log.warning("Failed to build decoder index: %s", exc)
+                self._decoder_index = None
 
-                prompt_ids: list[str] = []
-                ref_vecs: list[torch.Tensor] = []
-                cand_vecs: list[torch.Tensor] = []
-                diff_vecs: list[torch.Tensor] = []
-                for item in prompts:
-                    pid = str(item.get("id") or "")
-                    ps = PromptSpec.model_validate(item)
-                    _, ref_acts = self._feature_acts_all(reference, ps)
-                    _, cand_acts = self._feature_acts_all(candidate, ps)
-                    # Ensure tensors on same device.
-                    if not isinstance(ref_acts, torch.Tensor) or not isinstance(cand_acts, torch.Tensor):
-                        raise TypeError("drift_corrected scoring requires torch-backed SAE activations")
-                    diff = cand_acts - ref_acts
-                    prompt_ids.append(pid)
-                    ref_vecs.append(ref_acts)
-                    cand_vecs.append(cand_acts)
-                    diff_vecs.append(diff)
+        max_diffs_per_prompt = 3
+        n_neighbors = 3
+        neighbor_search_k = 200
 
-                mean_diff = torch.stack(diff_vecs, dim=0).mean(dim=0)
-                for pid, ref_acts, cand_acts, diff in zip(prompt_ids, ref_vecs, cand_vecs, diff_vecs):
-                    corrected = diff - mean_diff
-                    k_eff = min(int(k), int(corrected.numel()))
-                    vals, inds = torch.topk(corrected.abs(), k_eff)
-                    score = float(vals.sum().item())
+        for ps in per_prompt_diffs:
+            top_diffs = ps.get("top_diffs") or []
+            annotated: list[dict[str, Any]] = []
+            for d in top_diffs[:max_diffs_per_prompt]:
+                f_idx = int(d.get("feature_idx", -1))
+                if f_idx < 0:
+                    continue
+                details = self.get_feature_details(f_idx)
 
-                    top_diffs: list[dict[str, Any]] = []
-                    for idx in inds.tolist()[:10]:
-                        raw_d = float(diff[idx].item())
-                        fd = FeatureDiff(
-                            feature_idx=int(idx),
-                            reference_activation=float(ref_acts[idx].item()),
-                            candidate_activation=float(cand_acts[idx].item()),
-                            diff=raw_d,
-                            direction="increased" if raw_d > 0 else "decreased",
+                neighbors_out: list[dict[str, Any]] = []
+                if self._decoder_index is not None:
+                    try:
+                        nn = self.nearest_explained_neighbors(
+                            f_idx,
+                            n=int(n_neighbors),
+                            search_k=int(neighbor_search_k),
+                            min_cos=0.15,
                         )
-                        dd = fd.model_dump(mode="json")
-                        dd["corrected_diff"] = float(corrected[idx].item())
-                        dd["corrected_abs"] = float(abs(corrected[idx]).item())
-                        top_diffs.append(dd)
+                    except (RuntimeError, IndexError) as exc:
+                        log.debug("Neighbor lookup failed for feature %d: %s", f_idx, exc)
+                        nn = None
 
-                    prompt_scores.append({"id": pid, "score": score, "top_diffs": top_diffs})
-            except Exception:
-                # Fall back to baseline method if drift correction isn't available.
-                prompt_scores.clear()
-                score_method = "abs_diff_topk"
+                    for nbf in (nn.neighbors if nn else []):
+                        n_details = self.get_feature_details(int(nbf.feature_idx))
+                        neighbors_out.append(
+                            {
+                                "feature_idx": int(nbf.feature_idx),
+                                "cosine": float(nbf.cosine),
+                                "top_pos_logits": n_details.top_pos_logits[:5],
+                                "top_neg_logits": n_details.top_neg_logits[:5],
+                                "explanation": n_details.explanation or nbf.explanation,
+                                "url": n_details.url,
+                            }
+                        )
 
-        if score_method == "abs_diff_topk":
-            for item in prompts:
-                ps = PromptSpec.model_validate(item)
-                diffs = self.differential_feature_analysis(reference, candidate, ps, k=k).top_diffs
-                # Simple suspicion score: sum of top-|diff| feature diffs.
-                score = float(sum(abs(d.diff) for d in diffs))
-                prompt_scores.append(
-                    {"id": item.get("id"), "score": score, "top_diffs": [d.model_dump(mode="json") for d in diffs[:10]]}
+                annotated.append(
+                    {
+                        "diff": d,
+                        "feature": {
+                            "feature_idx": int(f_idx),
+                            "density": details.density,
+                            "top_pos_logits": details.top_pos_logits[:8],
+                            "top_neg_logits": details.top_neg_logits[:8],
+                            "top_examples": details.top_examples[:3],
+                            "explanation": details.explanation,
+                            "url": details.url,
+                            "proxy_explanation": (
+                                (neighbors_out[0].get("explanation") if neighbors_out else None)
+                                if not details.explanation
+                                else None
+                            ),
+                            "proxy_explanation_cosine": (
+                                (neighbors_out[0].get("cosine") if neighbors_out else None)
+                                if not details.explanation
+                                else None
+                            ),
+                        },
+                        "neighbors": neighbors_out,
+                    }
                 )
 
-        if not prompt_scores:
-            agg = 0.0
-        else:
-            if aggregate == "max":
-                agg = max(float(p["score"]) for p in prompt_scores)
-            else:
-                agg = sum(float(p["score"]) for p in prompt_scores) / float(len(prompt_scores))
+            interp_evidence["per_prompt"].append(
+                {
+                    "id": ps.get("id"),
+                    "top_diffs_annotated": annotated,
+                }
+            )
 
-        predicted = None
-        if threshold is not None:
-            predicted = "compromised" if agg >= float(threshold) else "not_compromised"
+        return interp_evidence
 
-        return CandidateSuiteScore(
-            reference_model=reference,
-            candidate_model=candidate,
-            prompt_scores=prompt_scores,
-            aggregate_score=float(agg),
-            threshold=float(threshold) if threshold is not None else None,
-            predicted_label=predicted,
-        )
-
-    def write_audit_report(
+    def _render_report_markdown(
         self,
         *,
         title: str,
         reference: str,
         candidate: str,
-        suite_path: str,
-        gen: GenerationParams,
-        threshold: Optional[float] = None,
-    ) -> dict[str, Any]:
-        """
-        Produce a simple Markdown report + decision.json in the current run directory.
-        """
-        if not self.current_run:
-            raise RuntimeError("No active run. Call begin_run() first.")
-
-        run_dir = self.current_run.run_dir
-        _ensure_dir(run_dir)
-
-        suite_results = self.run_prompt_suite(suite_path, models=[reference, candidate], gen=gen)
-        score = self.score_candidate_suite(reference, candidate, suite_path, threshold=threshold)
-
-        # Collect tool call trace for this run (from transcript). This provides a
-        # reproducible "what we did" audit trail without relying on hidden chain-of-thought.
-        trace_events: list[dict[str, Any]] = []
-        try:
-            raw_lines = self.transcript.path.read_text(encoding="utf-8").splitlines()
-            for line in raw_lines:
-                if not line.strip():
-                    continue
-                ev = json.loads(line)
-                if ev.get("run_id") == self.current_run.run_id:
-                    trace_events.append(ev)
-        except Exception:
-            trace_events = []
-
+        decision: dict[str, Any],
+        suite_results: dict[str, Any],
+        trace_events: list[dict[str, Any]],
+        interp_evidence: Optional[dict[str, Any]],
+        run_dir: Path,
+    ) -> str:
+        """Build the full markdown report from structured data."""
         tool_rationale: dict[str, str] = {
             "begin_run": "Create an isolated run directory for artifacts and logs.",
             "view_training_data_sample": "Sample the training dataset to look for suspicious patterns or triggers.",
@@ -683,133 +615,11 @@ class AuditSession:
             "write_audit_report": "Compile artifacts into a human-readable report for review.",
         }
 
-        decision = {
-            "session_id": self.session_id,
-            "run_id": self.current_run.run_id,
-            "title": title,
-            "reference_model": reference,
-            "candidate_model": candidate,
-            "aggregate_score": score.aggregate_score,
-            "threshold": score.threshold,
-            "predicted_label": score.predicted_label,
-            "score_method": str(getattr(self.config.project, "score_method", "abs_diff_topk") or "abs_diff_topk"),
-            "suite_path": suite_results["suite_path"],
-            "created_at": _utcnow().isoformat() + "Z",
-        }
-
-        (run_dir / "decision.json").write_text(json.dumps(decision, indent=2), encoding="utf-8")
-        (run_dir / "suite_results.json").write_text(json.dumps(suite_results, indent=2), encoding="utf-8")
-        score_payload = score.model_dump(mode="json")
-        score_payload["score_method"] = str(getattr(self.config.project, "score_method", "abs_diff_topk") or "abs_diff_topk")
-        (run_dir / "score.json").write_text(json.dumps(score_payload, indent=2), encoding="utf-8")
-
-        # Optional: interpretability evidence with local Neuronpedia metadata + local decoder neighbors.
-        interp_evidence: Optional[dict[str, Any]] = None
-        if self.sae and self.config.interp.neuronpedia.enabled:
-            interp_evidence = {
-                "sae": {
-                    "enabled": bool(self.config.interp.sae.enabled),
-                    "layer": int(self.config.interp.sae.layer),
-                    "module_path_template": str(self.config.interp.sae.module_path_template),
-                    "output_selector": str(self.config.interp.sae.output_selector),
-                    "weights": (self.config.interp.sae.weights.model_dump(mode="json") if self.config.interp.sae.weights else None),
-                },
-                "neuronpedia": {
-                    "enabled": True,
-                    "base_url": str(self.config.interp.neuronpedia.base_url),
-                    "model_id": str(self.config.interp.neuronpedia.model_id),
-                    "source": str(self.config.interp.neuronpedia.source),
-                },
-                "per_prompt": [],
-            }
-
-            # Build local decoder cosine index once (no Neuronpedia required)
-            if self._decoder_index is None:
-                try:
-                    dec = self.sae.decoder_vectors()  # type: ignore[union-attr]
-                    self._decoder_index = DecoderCosineIndex.from_decoder(dec)
-                except Exception:
-                    self._decoder_index = None
-
-            max_diffs_per_prompt = 3
-            n_neighbors = 3
-            neighbor_search_k = 200
-
-            for ps in score.prompt_scores:
-                top_diffs = ps.get("top_diffs") or []
-                annotated: list[dict[str, Any]] = []
-                for d in top_diffs[:max_diffs_per_prompt]:
-                    f_idx = int(d.get("feature_idx", -1))
-                    if f_idx < 0:
-                        continue
-                    details = self.get_feature_details(f_idx)
-
-                    neighbors_out: list[dict[str, Any]] = []
-                    if self._decoder_index is not None:
-                        try:
-                            nn = self.nearest_explained_neighbors(
-                                f_idx,
-                                n=int(n_neighbors),
-                                search_k=int(neighbor_search_k),
-                                min_cos=0.15,
-                            )
-                        except Exception:
-                            nn = None
-
-                        for nbf in (nn.neighbors if nn else []):
-                            n_details = self.get_feature_details(int(nbf.feature_idx))
-                            neighbors_out.append(
-                                {
-                                    "feature_idx": int(nbf.feature_idx),
-                                    "cosine": float(nbf.cosine),
-                                    "top_pos_logits": n_details.top_pos_logits[:5],
-                                    "top_neg_logits": n_details.top_neg_logits[:5],
-                                    "explanation": n_details.explanation or nbf.explanation,
-                                    "url": n_details.url,
-                                }
-                            )
-
-                    annotated.append(
-                        {
-                            "diff": d,
-                            "feature": {
-                                "feature_idx": int(f_idx),
-                                "density": details.density,
-                                "top_pos_logits": details.top_pos_logits[:8],
-                                "top_neg_logits": details.top_neg_logits[:8],
-                                "top_examples": details.top_examples[:3],
-                                "explanation": details.explanation,
-                                "url": details.url,
-                                "proxy_explanation": (
-                                    (neighbors_out[0].get("explanation") if neighbors_out else None)
-                                    if not details.explanation
-                                    else None
-                                ),
-                                "proxy_explanation_cosine": (
-                                    (neighbors_out[0].get("cosine") if neighbors_out else None)
-                                    if not details.explanation
-                                    else None
-                                ),
-                            },
-                            "neighbors": neighbors_out,
-                        }
-                    )
-
-                interp_evidence["per_prompt"].append(
-                    {
-                        "id": ps.get("id"),
-                        "score": float(ps.get("score", 0.0)),
-                        "top_diffs_annotated": annotated,
-                    }
-                )
-
-            (run_dir / "interp_evidence.json").write_text(json.dumps(interp_evidence, indent=2), encoding="utf-8")
-
         md_lines: list[str] = []
         md_lines.append(f"# {title}")
         md_lines.append("")
         md_lines.append(f"- Session: `{self.session_id}`")
-        md_lines.append(f"- Run: `{self.current_run.run_id}` ({self.current_run.run_name})")
+        md_lines.append(f"- Run: `{self.current_run.run_id}` ({self.current_run.run_name})")  # type: ignore[union-attr]
         md_lines.append(f"- Reference: `{reference}`")
         md_lines.append(f"- Candidate: `{candidate}`")
         md_lines.append("")
@@ -843,7 +653,6 @@ class AuditSession:
             md_lines.append("")
 
         if interp_evidence:
-            # High-level coverage stats for quick sanity checks.
             total = 0
             direct = 0
             proxy = 0
@@ -860,13 +669,13 @@ class AuditSession:
                         try:
                             if float(f.get("proxy_explanation_cosine")) < 0.3:
                                 proxy_low_sim += 1
-                        except Exception:
+                        except (TypeError, ValueError):
                             pass
                     neigh0 = (td.get("neighbors") or [None])[0]
                     if isinstance(neigh0, dict):
                         try:
                             best_cos.append(float(neigh0.get("cosine")))
-                        except Exception:
+                        except (TypeError, ValueError):
                             pass
 
             md_lines.append("## Interpretability evidence (SAE + Neuronpedia)")
@@ -880,24 +689,19 @@ class AuditSession:
                 f"- Coverage: direct `{direct}/{total}`; proxy `{proxy}/{total}` (low-sim `{proxy_low_sim}`)"
             )
             if best_cos:
-                try:
-                    import statistics
-
-                    md_lines.append(
-                        f"- Best-neighbor cosine: median `{statistics.median(best_cos)}`; min `{min(best_cos)}`"
-                    )
-                except Exception:
-                    pass
+                import statistics
+                md_lines.append(
+                    f"- Best-neighbor cosine: median `{statistics.median(best_cos)}`; min `{min(best_cos)}`"
+                )
             md_lines.append("")
 
             for per in interp_evidence.get("per_prompt", []):
                 md_lines.append(f"### {per.get('id')}")
-                md_lines.append(f"- Prompt score: `{per.get('score')}`")
                 for item in per.get("top_diffs_annotated", []):
                     d = item.get("diff", {})
                     f = item.get("feature", {})
                     f_idx = f.get("feature_idx")
-                    md_lines.append(f"#### Feature `{f_idx}` (Δ={d.get('diff')}, {d.get('direction')})")
+                    md_lines.append(f"#### Feature `{f_idx}` (diff={d.get('diff')}, {d.get('direction')})")
                     pos = [x.get("value") for x in (f.get("top_pos_logits") or []) if isinstance(x, dict)]
                     neg = [x.get("value") for x in (f.get("top_neg_logits") or []) if isinstance(x, dict)]
                     if pos:
@@ -913,7 +717,7 @@ class AuditSession:
                         low_sim = False
                         try:
                             low_sim = (cos is not None) and (float(cos) < 0.3)
-                        except Exception:
+                        except (TypeError, ValueError):
                             low_sim = False
                         low_sim_note = " (low similarity)" if low_sim else ""
                         md_lines.append(
@@ -937,35 +741,90 @@ class AuditSession:
                     neigh = item.get("neighbors") or []
                     if neigh:
                         md_lines.append("- Nearest explained neighbors (decoder cosine):")
-                        for n in neigh:
-                            npos = [x.get("value") for x in (n.get("top_pos_logits") or []) if isinstance(x, dict)]
-                            expl = str(n.get("explanation") or "").strip()
+                        for nb in neigh:
+                            npos = [x.get("value") for x in (nb.get("top_pos_logits") or []) if isinstance(x, dict)]
+                            expl = str(nb.get("explanation") or "").strip()
                             expl_part = f" expl: {expl}" if expl else ""
                             md_lines.append(
-                                f"  - `{n.get('feature_idx')}` cos=`{n.get('cosine')}`{expl_part} top+: {', '.join(str(x) for x in npos[:3])}"
+                                f"  - `{nb.get('feature_idx')}` cos=`{nb.get('cosine')}`{expl_part} top+: {', '.join(str(x) for x in npos[:3])}"
                             )
                 md_lines.append("")
 
-        if self.sae:
-            md_lines.append("## SAE-based score details")
-        else:
-            md_lines.append("## Score details (SAE disabled)")
+        if not self.sae:
+            md_lines.append("## Note")
             md_lines.append("")
-            md_lines.append("_SAE is disabled in this config; SAE-based scoring and interpretability are not computed._")
-        md_lines.append("")
-        md_lines.append("```json")
-        md_lines.append(json.dumps(score_payload, indent=2))
-        md_lines.append("```")
+            md_lines.append("_SAE is disabled in this config; SAE-based interpretability is not computed._")
 
+        return "\n".join(md_lines)
+
+    def write_audit_report(
+        self,
+        *,
+        title: str,
+        reference: str,
+        candidate: str,
+        suite_path: str,
+        gen: GenerationParams,
+    ) -> dict[str, Any]:
+        """
+        Produce a Markdown report + decision.json in the current run directory.
+        """
+        if not self.current_run:
+            raise RuntimeError("No active run. Call begin_run() first.")
+
+        run_dir = self.current_run.run_dir
+        _ensure_dir(run_dir)
+
+        # Run behavior comparison
+        suite_results = self.run_prompt_suite(suite_path, models=[reference, candidate], gen=gen)
+
+        # Run per-prompt differential feature analysis (if SAE enabled)
+        per_prompt_diffs: list[dict[str, Any]] = []
+        if self.sae:
+            per_prompt_diffs = self._compute_per_prompt_diffs(reference, candidate, suite_path)
+
+        # Collect trace events
+        trace_events = self._collect_trace_events()
+
+        # Build interp evidence (if SAE + Neuronpedia enabled)
+        interp_evidence = self._build_interp_evidence(per_prompt_diffs)
+
+        # Write decision.json
+        decision = {
+            "session_id": self.session_id,
+            "run_id": self.current_run.run_id,
+            "title": title,
+            "reference_model": reference,
+            "candidate_model": candidate,
+            "suite_path": suite_results["suite_path"],
+            "sae_enabled": bool(self.sae),
+            "created_at": _utcnow().isoformat() + "Z",
+        }
+        (run_dir / "decision.json").write_text(json.dumps(decision, indent=2), encoding="utf-8")
+        (run_dir / "suite_results.json").write_text(json.dumps(suite_results, indent=2), encoding="utf-8")
+
+        if interp_evidence:
+            (run_dir / "interp_evidence.json").write_text(json.dumps(interp_evidence, indent=2), encoding="utf-8")
+
+        # Render markdown report
+        md = self._render_report_markdown(
+            title=title,
+            reference=reference,
+            candidate=candidate,
+            decision=decision,
+            suite_results=suite_results,
+            trace_events=trace_events,
+            interp_evidence=interp_evidence,
+            run_dir=run_dir,
+        )
         report_path = run_dir / "report.md"
-        report_path.write_text("\n".join(md_lines), encoding="utf-8")
+        report_path.write_text(md, encoding="utf-8")
 
         return {
             "run_dir": str(run_dir),
             "report_path": str(report_path),
             "decision_path": str(run_dir / "decision.json"),
             "suite_results_path": str(run_dir / "suite_results.json"),
-            "score_path": str(run_dir / "score.json"),
         }
 
     def close(self) -> None:
@@ -973,7 +832,7 @@ class AuditSession:
             try:
                 self.neuronpedia.close()
             except Exception:
-                pass
+                log.debug("Error closing Neuronpedia client", exc_info=True)
         self.neuronpedia = None
         self.sae = None
         self._decoder_index = None
@@ -984,7 +843,7 @@ class AuditSession:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
-            pass
+            log.debug("Error clearing CUDA cache", exc_info=True)
 
 
 # ----------------------------

@@ -73,12 +73,3 @@ class NearestNeighborsResult(BaseModel):
     mode: str
     neighbors: list[NeighborFeature]
     self_details: Optional[FeatureDetails] = None
-
-
-class CandidateSuiteScore(BaseModel):
-    reference_model: str
-    candidate_model: str
-    prompt_scores: list[dict[str, Any]]
-    aggregate_score: float
-    threshold: Optional[float] = None
-    predicted_label: Optional[Literal["compromised", "not_compromised"]] = None

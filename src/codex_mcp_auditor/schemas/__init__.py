@@ -13,7 +13,6 @@ from .common import (
     TrainingSample,
 )
 from .interp import (
-    CandidateSuiteScore,
     CompareTopFeaturesResult,
     DifferentialFeatureAnalysisResult,
     FeatureActivation,
@@ -26,7 +25,6 @@ from .interp import (
 )
 
 __all__ = [
-    "CandidateSuiteScore",
     "CompareTopFeaturesResult",
     "DifferentialFeatureAnalysisResult",
     "FeatureActivation",

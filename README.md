@@ -194,7 +194,7 @@ In practice, the key built-in we rely on is the shell tool. It gives the investi
 ### Design principles
 
 - Keep the investigator model swappable. Start with Codex CLI as the harness, but expose audit capabilities as tools so other MCP-capable agents can be substituted later.
-- Exploit existing CLI built-ins. Use the shell tool for mundane tasks (dataset triage, quick scripts). Reserve the MCP server for audit-specific heavy compute (activations, SAEs, scoring, artifact writing).
+- Exploit existing CLI built-ins. Use the shell tool for mundane tasks (dataset triage, quick scripts). Reserve the MCP server for audit-specific heavy compute (activations, SAEs, analysis, artifact writing).
 - Make tool contracts explicit. Record prompt formatting, hookpoints, layer indexing, tokenization, and generation parameters so audits are reproducible.
 - Prefer minimal moving parts. Avoid shipping raw activations. Return compact summaries and write large artifacts (JSON) to disk with stable paths.
 - Log everything needed for evaluation. Record tool calls, outputs, and budgets.
@@ -348,7 +348,6 @@ FASTMCP_HOST=127.0.0.1 ft-audit-mcp serve --transport streamable-http
 - `differential_feature_analysis`: Compare activations between models
 - `get_feature_details`: Fetch Neuronpedia explanations
 - `nearest_explained_neighbors`: Find similar explained features
-- `score_candidate_suite`: Compute suspicion scores
 
 #### Standalone benchmark
 

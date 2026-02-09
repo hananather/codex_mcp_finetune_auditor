@@ -46,7 +46,7 @@ def test_feature_url_strips_trailing_slash():
 
 
 def test_pick_best_explanation_prioritizes_preferred_types():
-    """_pick_best_explanation should prioritize known, higher-quality explanation types."""
+    """pick_best_explanation should prioritize known, higher-quality explanation types."""
     cfg = NeuronpediaConfig(enabled=False, model_id="m", source="s")
     client = NeuronpediaClient(cfg)
 
@@ -56,7 +56,7 @@ def test_pick_best_explanation_prioritizes_preferred_types():
             {"description": "useful", "typeName": "np_acts-logits-general", "score": 0.0},
         ]
     }
-    assert client._pick_best_explanation(feature_json) == "useful"
+    assert client.pick_best_explanation(feature_json) == "useful"
 
 
 def test_to_feature_details_coerces_lists():
